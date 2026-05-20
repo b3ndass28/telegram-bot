@@ -405,8 +405,8 @@ async def make_instagram_profile_screenshot(url: str):
 
         page = await context.new_page()
 
-        await page.goto(url, wait_until="domcontentloaded", timeout=25000)
-        await page.wait_for_timeout(2500)
+        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        await page.wait_for_timeout(3000)
 
         await close_instagram_popups(page)
 
@@ -418,7 +418,7 @@ async def make_instagram_profile_screenshot(url: str):
         except Exception:
             pass
 
-        await page.wait_for_timeout(1000)
+        await page.wait_for_timeout(1500)
 
         await page.screenshot(
             path=screenshot_path,
@@ -465,7 +465,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def process_content(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
-    # Если пользователь отправил текст без ссылки — бот молчит
     if not has_link(text):
         return
 
@@ -537,7 +536,7 @@ async def on_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             media_path = await asyncio.wait_for(
                 make_instagram_profile_screenshot(url),
-                timeout=25
+                timeout=45
             )
 
             with open(media_path, "rb") as photo_file:
@@ -609,7 +608,7 @@ async def on_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
         clear_pending_content(user_id)
 
     except Exception as e:
-        logger.error(f"Ошибка обработки медиа: {e}")
+        logger.error(f"Ошибка обработки медиа: {type(e).__name__}: {repr(e)}")
 
         fallback_text = (
             f"🎬 {platform}\n\n"
@@ -641,7 +640,7 @@ async def on_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
             clear_pending_content(user_id)
 
         except Exception as send_error:
-            logger.error(f"Ошибка fallback-отправки: {send_error}")
+            logger.error(f"Ошибка fallback-отправки: {type(send_error).__name__}: {repr(send_error)}")
             await query.edit_message_text(f"❌ Ошибка: {send_error}")
 
     finally:
@@ -676,7 +675,7 @@ async def check_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    logger.error(f"Update {update} caused error: {context.error}")
+    logger.error(f"Update {update} caused error: {type(context.error).__name__}: {repr(context.error)}")
 
 
 # =========================
