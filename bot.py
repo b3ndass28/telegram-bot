@@ -11,15 +11,21 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BOT_TOKEN = os.getenv('BOT_TOKEN', '8874972095:AAGsabDd2bc0Sdm72Z80IJMUnXgJ6K2sYxQ')
+BOT_TOKEN = os.getenv('BOT_TOKEN')
+if not BOT_TOKEN:
+    raise ValueError("BOT_TOKEN не найден в переменных окружения")
+
 CHAT_ID = -3794802790
 TOPICS = ['CowGirl', 'Student', 'Meme', 'Telegram', 'X', 'Threads']
 POST_COUNTER_FILE = 'post_counter.json'
 
 def load_post_counter():
     if os.path.exists(POST_COUNTER_FILE):
-        with open(POST_COUNTER_FILE, 'r') as f:
-            return json.load(f)
+        try:
+            with open(POST_COUNTER_FILE, 'r') as f:
+                return json.load(f)
+        except json.JSONDecodeError:
+            return {topic: 0 for topic in TOPICS}
     return {topic: 0 for topic in TOPICS}
 
 def save_post_counter(counter):
@@ -107,7 +113,7 @@ async def topic_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         topic_id = get_topic_id(selected_topic)
         
-        if topic_id:
+        if topic_id is not None:
             await context.bot.send_message(
                 chat_id=CHAT_ID,
                 message_thread_id=topic_id,
