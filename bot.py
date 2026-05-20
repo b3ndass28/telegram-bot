@@ -1,19 +1,13 @@
-
-import logging
-import json
-import os
-import re
-import uuid
-import csv
 import asyncio
+import logging
+import os
 import threading
 import time
-from pathlib import Path
+import uuid
 from datetime import datetime
+from pathlib import Path
 
-import yt_dlp
 from flask import Flask
-from playwright.async_api import async_playwright
 
 from telegram import (
     Update,
@@ -33,6 +27,58 @@ from telegram.ext import (
     filters
 )
 
+from config import (
+    BOT_TOKEN,
+    CHAT_ID,
+    TOPICS_IMAGE,
+    INFO_IMAGE,
+    EXPORT_IMAGE,
+    COOKIES_FILE,
+    DOWNLOAD_DIR,
+    TOPICS_FILE,
+    DATABASE_FILE,
+    REMINDERS_FILE,
+    PRIORITIES,
+    STATUSES
+)
+
+from helpers import (
+    load_topics,
+    save_topics,
+    get_topic_names,
+    get_topic_id,
+    get_topic_icon,
+    guess_topic_icon,
+    topics_text,
+    add_database_item,
+    update_database_item,
+    load_database,
+    load_reminders,
+    add_reminder,
+    reminders_loop,
+    set_pending_content,
+    get_pending_content,
+    clear_pending_content,
+    has_link,
+    extract_url_and_thought,
+    clean_url,
+    normalize_instagram_url,
+    extract_instagram_username,
+    detect_platform,
+    is_instagram_profile,
+    safe_file_exists,
+    build_video_caption,
+    build_profile_caption,
+    build_reminder_text,
+    current_timestamp,
+    send_photo_or_text_message,
+    edit_or_send_photo,
+    safe_edit_message,
+    download_video,
+    make_instagram_profile_screenshot,
+    create_export_json,
+    create_export_csv,
+)
 
 # =========================
 # WEB SERVER FOR RENDER
@@ -64,503 +110,43 @@ logger = logging.getLogger(__name__)
 
 
 # =========================
-# CONFIG
+# INFO TEXTS
 # =========================
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHAT_ID = -1003794802790
-
-PENDING_FILE = "pending.json"
-TOPICS_FILE = "topics.json"
-DATABASE_FILE = "database.json"
-REMINDERS_FILE = "reminders.json"
-
-DOWNLOAD_DIR = "downloads"
-COOKIES_FILE = "cookies.txt"
-
-ASSETS_DIR = "assets"
-TOPICS_IMAGE = os.path.join(ASSETS_DIR, "topics.jpg")
-INFO_IMAGE = os.path.join(ASSETS_DIR, "info.jpg")
-EXPORT_IMAGE = os.path.join(ASSETS_DIR, "export.jpg")
-
-Path(DOWNLOAD_DIR).mkdir(exist_ok=True)
-
-DEFAULT_TOPICS = {
-    "CowGirl": {"id": 2, "icon": "🤠"},
-    "Student": {"id": 6, "icon": "🎓"},
-    "Meme": {"id": 7, "icon": "😂"},
-    "Telegram": {"id": 4, "icon": "✈️"},
-    "X": {"id": 8, "icon": "𝕏"},
-    "Threads": {"id": 9, "icon": "🧵"},
-    "Instagram": {"id": 22, "icon": "📸"}
-}
-
-PRIORITIES = {
-    "high": {"label": "🔥 High", "short": "High"},
-    "normal": {"label": "⭐ Normal", "short": "Normal"},
-    "later": {"label": "🧊 Later", "short": "Later"}
-}
-
-STATUSES = {
-    "new": "🆕 New",
-    "progress": "🟡 In Progress",
-    "done": "✅ Done",
-    "bad": "❌ Not Suitable"
-}
-
-REMINDER_OPTIONS = {
-    "tomorrow": {"label": "⏰ Tomorrow", "seconds": 24 * 60 * 60},
-    "3days": {"label": "📅 3 Days", "seconds": 3 * 24 * 60 * 60},
-    "7days": {"label": "🗓️ 7 Days", "seconds": 7 * 24 * 60 * 60}
-}
-
-
-# =========================
-# JSON HELPERS
-# =========================
-
-def load_json_file(path, default):
-    if os.path.exists(path):
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception as e:
-            logger.error(f"Ошибка чтения {path}: {e}")
-    return default
-
-
-def save_json_file(path, data):
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        logger.error(f"Ошибка сохранения {path}: {e}")
-
-
-# =========================
-# TOPICS
-# =========================
-
-def load_topics():
-    data = load_json_file(TOPICS_FILE, None)
-
-    if not data:
-        save_topics(DEFAULT_TOPICS)
-        return DEFAULT_TOPICS.copy()
-
-    fixed = {}
-
-    try:
-        for name, value in data.items():
-            if isinstance(value, dict):
-                fixed[name] = {
-                    "id": int(value.get("id")),
-                    "icon": value.get("icon", "📂")
-                }
-            else:
-                fixed[name] = {
-                    "id": int(value),
-                    "icon": "📂"
-                }
-
-        return fixed
-
-    except Exception as e:
-        logger.error(f"Ошибка нормализации topics.json: {e}")
-        save_topics(DEFAULT_TOPICS)
-        return DEFAULT_TOPICS.copy()
-
-
-def save_topics(topics):
-    save_json_file(TOPICS_FILE, topics)
-
-
-def get_topic_names():
-    return list(load_topics().keys())
-
-
-def get_topic_id(name):
-    topics = load_topics()
-    item = topics.get(name)
-    return item.get("id") if item else None
-
-
-def get_topic_icon(name):
-    topics = load_topics()
-    item = topics.get(name)
-    return item.get("icon", "📂") if item else "📂"
-
-
-def guess_topic_icon(name):
-    lower = name.lower()
-
-    if "inst" in lower:
-        return "📸"
-    if "cow" in lower:
-        return "🤠"
-    if "student" in lower:
-        return "🎓"
-    if "meme" in lower:
-        return "😂"
-    if "telegram" in lower:
-        return "✈️"
-    if lower == "x" or "twitter" in lower:
-        return "𝕏"
-    if "thread" in lower:
-        return "🧵"
-    if "car" in lower or "auto" in lower:
-        return "🏎️"
-    if "idea" in lower:
-        return "💡"
-    if "ref" in lower:
-        return "📌"
-
-    return "📂"
-
-
-def topics_text():
-    topics = load_topics()
-
-    if not topics:
-        return "📂 Топиков пока нет."
-
-    lines = ["📂 Текущие топики:\n"]
-
-    for name, data in topics.items():
-        icon = data.get("icon", "📂")
-        topic_id = data.get("id")
-        lines.append(f"{icon} {name} — ID: {topic_id}")
-
-    return "\n".join(lines)
-
-
-# =========================
-# DATABASE
-# =========================
-
-def load_database():
-    data = load_json_file(DATABASE_FILE, [])
-    return data if isinstance(data, list) else []
-
-
-def save_database(data):
-    save_json_file(DATABASE_FILE, data)
-
-
-def add_database_item(item):
-    data = load_database()
-    data.append(item)
-    save_database(data)
-
-
-def find_database_item(item_id):
-    for item in load_database():
-        if item.get("id") == item_id:
-            return item
-    return None
-
-
-def update_database_item(item_id, updates):
-    data = load_database()
-
-    for item in data:
-        if item.get("id") == item_id:
-            item.update(updates)
-            item["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            save_database(data)
-            return item
-
-    return None
-
-
-# =========================
-# REMINDERS
-# =========================
-
-def load_reminders():
-    data = load_json_file(REMINDERS_FILE, [])
-    return data if isinstance(data, list) else []
-
-
-def save_reminders(data):
-    save_json_file(REMINDERS_FILE, data)
-
-
-def add_reminder(item_id, user_id, due_ts, label):
-    reminders = load_reminders()
-
-    reminder = {
-        "id": str(uuid.uuid4()),
-        "item_id": item_id,
-        "user_id": user_id,
-        "due_ts": due_ts,
-        "label": label,
-        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "sent": False
-    }
-
-    reminders.append(reminder)
-    save_reminders(reminders)
-    return reminder
-
-
-async def reminders_loop(application: Application):
-    await asyncio.sleep(10)
-
-    while True:
-        try:
-            now = time.time()
-            reminders = load_reminders()
-            changed = False
-
-            for reminder in reminders:
-                if reminder.get("sent"):
-                    continue
-
-                if reminder.get("due_ts", 0) <= now:
-                    item = find_database_item(reminder.get("item_id"))
-
-                    if item:
-                        text = (
-                            f"🔔 Reminder\n\n"
-                            f"Пора вернуться к идее:\n\n"
-                            f"🎬 {item.get('platform', '')}\n"
-                            f"⚡ Priority: {item.get('priority_label', '')}\n"
-                            f"📌 Status: {item.get('status_label', '')}\n\n"
-                            f"🔗 Link:\n{item.get('url', '')}\n\n"
-                            f"💭 Notes:\n{item.get('notes', '')}"
-                        )
-
-                        try:
-                            await application.bot.send_message(
-                                chat_id=reminder.get("user_id"),
-                                text=text
-                            )
-                        except Exception as e:
-                            logger.error(f"Не удалось отправить reminder: {type(e).__name__}: {repr(e)}")
-
-                    reminder["sent"] = True
-                    reminder["sent_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    changed = True
-
-            if changed:
-                save_reminders(reminders)
-
-        except Exception as e:
-            logger.error(f"Ошибка reminder loop: {type(e).__name__}: {repr(e)}")
-
-        await asyncio.sleep(60)
-
-
-async def post_init(application: Application):
-    application.create_task(reminders_loop(application))
-
-
-# =========================
-# PENDING
-# =========================
-
-def load_pending():
-    data = load_json_file(PENDING_FILE, {})
-    return data if isinstance(data, dict) else {}
-
-
-def save_pending(data):
-    save_json_file(PENDING_FILE, data)
-
-
-def set_pending_content(user_id, content):
-    data = load_pending()
-    data[str(user_id)] = content
-    save_pending(data)
-
-
-def get_pending_content(user_id):
-    data = load_pending()
-    return data.get(str(user_id))
-
-
-def clear_pending_content(user_id):
-    data = load_pending()
-    data.pop(str(user_id), None)
-    save_pending(data)
-
-
-# =========================
-# GENERAL HELPERS
-# =========================
-
-def has_link(text: str) -> bool:
-    return "http://" in text or "https://" in text
-
-
-def extract_url_and_thought(text: str):
-    url_match = re.search(r"https?://\S+", text)
-
-    if not url_match:
-        return None, text.strip()
-
-    url = url_match.group(0).strip()
-    thought = text.replace(url, "", 1).strip()
-
-    if not thought:
-        thought = "Без текста"
-
-    return url, thought
-
-
-def detect_platform(url: str) -> str:
-    url_lower = url.lower()
-
-    if "instagram.com" in url_lower:
-        if "/reel/" in url_lower or "/reels/" in url_lower:
-            return "Instagram Reel"
-        if "/p/" in url_lower:
-            return "Instagram Post"
-        if "/stories/" in url_lower:
-            return "Instagram Story"
-        return "Instagram Profile"
-
-    if "tiktok.com" in url_lower or "vm.tiktok.com" in url_lower:
-        return "TikTok"
-
-    if "youtube.com/shorts" in url_lower:
-        return "YouTube Shorts"
-
-    if "youtube.com" in url_lower or "youtu.be" in url_lower:
-        return "YouTube"
-
-    if "x.com" in url_lower or "twitter.com" in url_lower:
-        return "X / Twitter"
-
-    if "threads.net" in url_lower:
-        return "Threads"
-
-    return "Video"
-
-
-def is_instagram_profile(url: str) -> bool:
-    url_lower = url.lower()
-
-    if "instagram.com" not in url_lower:
-        return False
-
-    not_profile_parts = [
-        "/reel/",
-        "/reels/",
-        "/p/",
-        "/stories/",
-        "/tv/",
-        "/explore/",
-        "/accounts/",
-        "/direct/"
-    ]
-
-    return not any(part in url_lower for part in not_profile_parts)
-
-
-def safe_file_exists(path):
-    return os.path.exists(path) and os.path.isfile(path)
-
-
-def build_caption(platform, url, thought, priority_label, status_label, reminder_label=None):
-    reminder_line = ""
-    if reminder_label:
-        reminder_line = f"\n🔔 Reminder: {reminder_label}"
-
-    return (
-        f"🎬 {platform}\n\n"
-        f"⚡ Priority: {priority_label}\n"
-        f"📌 Status: {status_label}"
-        f"{reminder_line}\n\n"
-        f"🔗 Link:\n{url}\n\n"
-        f"💭 Notes:\n{thought}"
-    )
-
-
-async def send_photo_or_text_message(message, image_path, caption, reply_markup=None):
-    if safe_file_exists(image_path):
-        with open(image_path, "rb") as photo:
-            await message.reply_photo(
-                photo=photo,
-                caption=caption,
-                reply_markup=reply_markup
-            )
-    else:
-        await message.reply_text(
-            caption,
-            reply_markup=reply_markup
-        )
-
-
-async def edit_or_send_photo(query, image_path, caption, reply_markup=None):
-    try:
-        await query.message.delete()
-    except Exception:
-        pass
-
-    if safe_file_exists(image_path):
-        with open(image_path, "rb") as photo:
-            await query.message.chat.send_photo(
-                photo=photo,
-                caption=caption,
-                reply_markup=reply_markup
-            )
-    else:
-        await query.message.chat.send_message(
-            caption,
-            reply_markup=reply_markup
-        )
-
-
-async def safe_edit_message(query, text, reply_markup=None):
-    """
-    Безопасно редактирует и обычные текстовые сообщения, и photo+caption.
-    """
-    try:
-        if query.message and query.message.photo:
-            await query.edit_message_caption(
-                caption=text,
-                reply_markup=reply_markup
-            )
-        else:
-            await query.edit_message_text(
-                text=text,
-                reply_markup=reply_markup
-            )
-    except Exception:
-        try:
-            await query.message.reply_text(
-                text,
-                reply_markup=reply_markup
-            )
-        except Exception as e:
-            logger.error(f"safe_edit_message failed: {type(e).__name__}: {repr(e)}")
-
-
-async def update_post_message(query, item):
-    new_caption = build_caption(
-        item.get("platform", "Unknown"),
-        item.get("url", ""),
-        item.get("notes", ""),
-        item.get("priority_label", ""),
-        item.get("status_label", ""),
-        item.get("reminder_label")
-    )
-
-    try:
-        await query.edit_message_caption(
-            caption=new_caption,
-            reply_markup=build_post_action_keyboard(item.get("id"))
-        )
-    except Exception:
-        try:
-            await query.edit_message_text(
-                text=new_caption,
-                reply_markup=build_post_action_keyboard(item.get("id"))
-            )
-        except Exception as e:
-            logger.error(f"Не удалось обновить пост: {type(e).__name__}: {repr(e)}")
+INFO_SHORT_TEXT = (
+    "ℹ️ Referens Bot\n\n"
+    "Главная функция бота — сохранять контент-референсы уже вместе с медиа, "
+    "твоими заметками, приоритетом, статусом и напоминаниями.\n\n"
+    "Отправь ссылку + свою мысль → выбери топик → выбери приоритет → бот сохранит референс в нужный раздел."
+)
+
+INFO_LONG_TEXT = (
+    "Что умеет бот:\n\n"
+    "🎬 Сохранять видео-референсы\n"
+    "Бот может скачать поддерживаемое видео из Instagram, TikTok, YouTube и других источников "
+    "и отправить его в выбранный топик.\n\n"
+    "💭 Сохранять твои заметки\n"
+    "Вместе с видео сохраняются твои мысли: что понравилось, как адаптировать идею, какой хук, стиль, монтаж или сценарий повторить.\n\n"
+    "📸 Делать скрин Instagram-аккаунтов\n"
+    "Если отправить ссылку на Instagram-профиль, бот делает мобильный скрин аккаунта и сохраняет его как референс без priority/status/reminder.\n\n"
+    "📂 Раскладывать всё по топикам\n"
+    "Топики можно создавать, переименовывать и удалять прямо через бота.\n\n"
+    "⚡ Приоритет\n"
+    "🔥 High — использовать быстрее\n"
+    "⭐ Normal — обычная хорошая идея\n"
+    "🧊 Later — идея на потом\n\n"
+    "📌 Статус\n"
+    "🆕 New — новая идея\n"
+    "🟡 In Progress — в работе\n"
+    "✅ Done — сделано\n"
+    "❌ Not Suitable — не подходит\n\n"
+    "🔔 Напоминания\n"
+    "Можно поставить reminder от 1 до 15 дней или тест на 1 минуту.\n\n"
+    "📤 Export\n"
+    "Базу идей можно выгрузить в JSON или CSV.\n\n"
+    "Пример:\n"
+    "https://www.instagram.com/reel/... хороший хук, можно адаптировать под cowgirl-видео"
+)
 
 
 # =========================
@@ -724,18 +310,26 @@ def build_status_manage_keyboard(item_id):
 
 
 def build_reminder_manage_keyboard(item_id):
-    keyboard = [
-        [
-            InlineKeyboardButton("⏰ Tomorrow", callback_data=f"post_reminder_set:tomorrow:{item_id}"),
-            InlineKeyboardButton("📅 3 Days", callback_data=f"post_reminder_set:3days:{item_id}")
-        ],
-        [
-            InlineKeyboardButton("🗓️ 7 Days", callback_data=f"post_reminder_set:7days:{item_id}")
-        ],
-        [
-            InlineKeyboardButton("⬅️ Назад", callback_data=f"post_back:{item_id}")
-        ]
-    ]
+    keyboard = []
+
+    keyboard.append([
+        InlineKeyboardButton("🧪 1 min test", callback_data=f"post_reminder_set:test:{item_id}")
+    ])
+
+    for start in range(1, 16, 3):
+        row = []
+        for day in range(start, min(start + 3, 16)):
+            row.append(
+                InlineKeyboardButton(
+                    f"{day}d",
+                    callback_data=f"post_reminder_set:{day}d:{item_id}"
+                )
+            )
+        keyboard.append(row)
+
+    keyboard.append([
+        InlineKeyboardButton("⬅️ Назад", callback_data=f"post_back:{item_id}")
+    ])
 
     return InlineKeyboardMarkup(keyboard)
 
@@ -787,584 +381,36 @@ def build_back_cancel_keyboard():
 
 
 # =========================
-# COOKIES FOR PLAYWRIGHT
+# POST UPDATE
 # =========================
 
-def load_netscape_cookies_for_playwright(cookie_file: str):
-    cookies = []
-
-    if not os.path.exists(cookie_file):
-        logger.warning("cookies.txt не найден для Playwright.")
-        return cookies
+async def update_post_message(query, item):
+    new_caption = build_video_caption(
+        item.get("platform", "Unknown"),
+        item.get("url", ""),
+        item.get("notes", ""),
+        item.get("priority_label", ""),
+        item.get("status_label", ""),
+        item.get("reminder_label")
+    )
 
     try:
-        with open(cookie_file, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-
-        for line in lines:
-            line = line.strip()
-
-            if not line or line.startswith("# Netscape"):
-                continue
-
-            http_only = False
-
-            if line.startswith("#HttpOnly_"):
-                http_only = True
-                line = line.replace("#HttpOnly_", "", 1)
-
-            if line.startswith("#"):
-                continue
-
-            parts = line.split("\t")
-
-            if len(parts) < 7:
-                continue
-
-            domain, flag, path, secure, expiration, name, value = parts[:7]
-
-            try:
-                expires = int(expiration)
-            except Exception:
-                expires = -1
-
-            if expires == 0:
-                expires = -1
-
-            cookie = {
-                "name": name,
-                "value": value,
-                "domain": domain,
-                "path": path,
-                "expires": expires,
-                "httpOnly": http_only,
-                "secure": secure.upper() == "TRUE",
-                "sameSite": "Lax"
-            }
-
-            cookies.append(cookie)
-
-        logger.info(f"Загружено cookies для Playwright: {len(cookies)}")
-        return cookies
-
-    except Exception as e:
-        logger.error(f"Ошибка чтения cookies.txt для Playwright: {type(e).__name__}: {repr(e)}")
-        return []
-
-
-# =========================
-# VIDEO DOWNLOAD WITH YT-DLP
-# =========================
-
-def download_video_sync(url: str):
-    video_id = str(uuid.uuid4())
-    output_template = os.path.join(DOWNLOAD_DIR, f"{video_id}.%(ext)s")
-
-    ydl_opts = {
-        "outtmpl": output_template,
-        "format": "best[ext=mp4]/best",
-        "noplaylist": True,
-        "quiet": False,
-        "no_warnings": False,
-        "max_filesize": 48 * 1024 * 1024,
-        "merge_output_format": "mp4",
-    }
-
-    if os.path.exists(COOKIES_FILE):
-        logger.info("cookies.txt найден. Использую cookies для yt-dlp.")
-        ydl_opts["cookiefile"] = COOKIES_FILE
-    else:
-        logger.warning("cookies.txt не найден. Instagram может не скачаться.")
-
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        downloaded_path = ydl.prepare_filename(info)
-
-    if not os.path.exists(downloaded_path):
-        possible_files = list(Path(DOWNLOAD_DIR).glob(f"{video_id}.*"))
-
-        if possible_files:
-            downloaded_path = str(possible_files[0])
-        else:
-            raise FileNotFoundError("Видео не было скачано.")
-
-    return downloaded_path
-
-
-async def download_video(url: str):
-    return await asyncio.to_thread(download_video_sync, url)
-
-
-# =========================
-# INSTAGRAM SCREENSHOT HELPERS
-# =========================
-
-async def js_click_by_text(page, words):
-    try:
-        result = await page.evaluate(
-            """
-            (words) => {
-                const targets = words.map(w => w.toLowerCase());
-
-                function isVisible(el) {
-                    const rect = el.getBoundingClientRect();
-                    const style = window.getComputedStyle(el);
-                    return rect.width > 0 &&
-                           rect.height > 0 &&
-                           style.visibility !== 'hidden' &&
-                           style.display !== 'none';
-                }
-
-                const candidates = Array.from(document.querySelectorAll(
-                    'button, div[role="button"], a, span, div'
-                ));
-
-                for (const el of candidates) {
-                    const text = (el.innerText || el.textContent || '').trim().toLowerCase();
-
-                    if (!text) continue;
-                    if (!isVisible(el)) continue;
-
-                    for (const target of targets) {
-                        if (text.includes(target)) {
-                            const clickable = el.closest('button, div[role="button"], a') || el;
-                            clickable.click();
-                            return { clicked: true, text };
-                        }
-                    }
-                }
-
-                return { clicked: false, text: null };
-            }
-            """,
-            words
+        await query.edit_message_caption(
+            caption=new_caption,
+            reply_markup=build_post_action_keyboard(item.get("id"))
         )
-
-        if result and result.get("clicked"):
-            logger.info(f"JS click сработал: {result.get('text')}")
-            await page.wait_for_timeout(2500)
-            return True
-
-    except Exception as e:
-        logger.warning(f"JS click failed: {type(e).__name__}: {repr(e)}")
-
-    return False
-
-
-async def click_continue_if_needed(page):
-    logger.info("Проверяю Continue screen...")
-
-    async def continue_still_visible():
-        try:
-            text = await page.locator("body").inner_text(timeout=3000)
-            text_lower = text.lower()
-            return "continue" in text_lower
-        except Exception:
-            return False
-
-    async def wait_continue_disappear():
-        for _ in range(8):
-            if not await continue_still_visible():
-                logger.info("Continue screen исчез.")
-                return True
-            await page.wait_for_timeout(1000)
-
-        logger.warning("Continue screen всё еще виден после клика.")
-        return False
-
-    try:
-        clicked = await page.evaluate(
-            """
-            () => {
-                const candidates = Array.from(document.querySelectorAll(
-                    'button, div[role="button"], a, span, div'
-                ));
-
-                function isVisible(el) {
-                    const rect = el.getBoundingClientRect();
-                    const style = window.getComputedStyle(el);
-                    return rect.width > 0 &&
-                           rect.height > 0 &&
-                           style.visibility !== 'hidden' &&
-                           style.display !== 'none';
-                }
-
-                for (const el of candidates) {
-                    const text = (el.innerText || el.textContent || '').trim().toLowerCase();
-
-                    if (!text) continue;
-                    if (!isVisible(el)) continue;
-
-                    if (text.includes('continue')) {
-                        const clickable = el.closest('button, div[role="button"], a') || el;
-
-                        clickable.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
-                        clickable.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-                        clickable.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-                        clickable.click();
-
-                        return { clicked: true, text };
-                    }
-                }
-
-                return { clicked: false };
-            }
-            """
-        )
-
-        if clicked and clicked.get("clicked"):
-            logger.info(f"JS Continue click: {clicked}")
-            await page.wait_for_timeout(3000)
-
-            if await wait_continue_disappear():
-                return True
-
-    except Exception as e:
-        logger.warning(f"JS Continue click failed: {type(e).__name__}: {repr(e)}")
-
-    selectors = [
-        "text=Continue",
-        "text=Continue as",
-        "button:has-text('Continue')",
-        "div[role='button']:has-text('Continue')",
-        "a:has-text('Continue')"
-    ]
-
-    for selector in selectors:
-        try:
-            await page.locator(selector).first.click(timeout=2500, force=True)
-            logger.info(f"Continue нажат через selector: {selector}")
-            await page.wait_for_timeout(3000)
-
-            if await wait_continue_disappear():
-                return True
-
-        except Exception:
-            pass
-
-    coordinate_clicks = [
-        (195, 515),
-        (195, 535),
-        (195, 555),
-        (195, 575),
-        (195, 595),
-        (195, 615),
-    ]
-
-    for x, y in coordinate_clicks:
-        try:
-            await page.mouse.click(x, y)
-            logger.info(f"Continue fallback click: {x}, {y}")
-            await page.wait_for_timeout(3000)
-
-            if await wait_continue_disappear():
-                return True
-
-        except Exception:
-            pass
-
-    logger.warning("Continue не удалось нажать.")
-    return False
-
-
-async def close_instagram_popups(page):
-    logger.info("Закрываю Instagram popup'ы...")
-
-    popup_words = [
-        "Not now",
-        "Not Now",
-        "Maybe later",
-        "Allow all cookies",
-        "Accept all",
-        "Accept",
-        "Save info",
-        "Save your login info"
-    ]
-
-    await js_click_by_text(page, popup_words)
-
-    selectors = [
-        "text=Not now",
-        "text=Not Now",
-        "text=Maybe later",
-        "text=Allow all cookies",
-        "text=Accept all",
-        "text=Accept"
-    ]
-
-    for selector in selectors:
-        try:
-            await page.locator(selector).first.click(timeout=1000)
-            logger.info(f"Popup закрыт через selector: {selector}")
-            await page.wait_for_timeout(500)
-        except Exception:
-            pass
-
-    try:
-        await page.keyboard.press("Escape")
-        await page.wait_for_timeout(500)
     except Exception:
-        pass
-
-    try:
-        await page.mouse.click(358, 65)
-        await page.wait_for_timeout(500)
-    except Exception:
-        pass
-
-
-async def wait_for_real_page_render(page):
-    try:
-        await page.wait_for_selector("body", timeout=15000)
-    except Exception:
-        pass
-
-    try:
-        await page.wait_for_function(
-            """
-            () => {
-                const bodyText = document.body ? document.body.innerText.trim() : '';
-                const imgs = document.querySelectorAll('img').length;
-                const articles = document.querySelectorAll('article').length;
-                const main = document.querySelector('main');
-
-                return bodyText.length > 50 || imgs > 2 || articles > 0 || main;
-            }
-            """,
-            timeout=20000
-        )
-        logger.info("Страница выглядит отрисованной.")
-    except Exception as e:
-        logger.warning(f"Не дождался полной отрисовки страницы: {type(e).__name__}: {repr(e)}")
-
-
-async def goto_instagram_page(page, url, label):
-    logger.info(f"Открываю страницу [{label}]: {url}")
-
-    try:
-        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-    except Exception as e:
-        logger.warning(f"goto warning [{label}]: {type(e).__name__}: {repr(e)}")
-
-    await wait_for_real_page_render(page)
-    await page.wait_for_timeout(5000)
-
-
-async def make_instagram_profile_screenshot(url: str):
-    screenshot_id = str(uuid.uuid4())
-    screenshot_path = os.path.join(DOWNLOAD_DIR, f"{screenshot_id}.png")
-
-    cookies = load_netscape_cookies_for_playwright(COOKIES_FILE)
-
-    browser = None
-
-    async with async_playwright() as p:
         try:
-            logger.info("Запускаю Chromium...")
-
-            browser = await p.chromium.launch(
-                headless=True,
-                args=[
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-gpu",
-                    "--disable-blink-features=AutomationControlled"
-                ]
+            await query.edit_message_text(
+                text=new_caption,
+                reply_markup=build_post_action_keyboard(item.get("id"))
             )
-
-            context = await browser.new_context(
-                viewport={"width": 390, "height": 844},
-                device_scale_factor=2,
-                is_mobile=True,
-                has_touch=True,
-                locale="en-US",
-                timezone_id="America/New_York",
-                user_agent=(
-                    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
-                    "AppleWebKit/605.1.15 (KHTML, like Gecko) "
-                    "Version/17.0 Mobile/15E148 Safari/604.1"
-                )
-            )
-
-            context.set_default_timeout(10000)
-            context.set_default_navigation_timeout(30000)
-
-            if cookies:
-                await context.add_cookies(cookies)
-                logger.info(f"Cookies добавлены в Playwright context: {len(cookies)}")
-            else:
-                logger.warning("Cookies не добавлены в Playwright context.")
-
-            page = await context.new_page()
-
-            try:
-                await page.add_init_script(
-                    """
-                    Object.defineProperty(navigator, 'webdriver', {
-                        get: () => undefined
-                    });
-                    """
-                )
-            except Exception:
-                pass
-
-            logger.info("STEP 1: Открываю профиль впервые.")
-            await goto_instagram_page(page, url, "profile-first")
-
-            logger.info("STEP 2: Проверяю Continue.")
-            did_continue = await click_continue_if_needed(page)
-
-            if did_continue:
-                logger.info("STEP 3: Continue был нажат. Открываю профиль заново.")
-                await goto_instagram_page(page, url, "profile-after-continue")
-
-            logger.info("STEP 4: Закрываю popup'ы.")
-            await close_instagram_popups(page)
-            await page.wait_for_timeout(2000)
-
-            try:
-                current_url = page.url.lower()
-                logger.info(f"URL перед финальной проверкой: {current_url}")
-
-                if (
-                    "accounts" in current_url
-                    or "login" in current_url
-                    or "onetap" in current_url
-                    or "challenge" in current_url
-                ):
-                    logger.info("Все еще login/accounts/challenge. Финально открываю профиль.")
-                    await goto_instagram_page(page, url, "profile-final")
-                    await close_instagram_popups(page)
-                    await page.wait_for_timeout(2000)
-
-            except Exception as e:
-                logger.warning(f"Финальная проверка URL failed: {type(e).__name__}: {repr(e)}")
-
-            logger.info("STEP 6: Догружаю профиль перед скрином.")
-
-            await page.wait_for_timeout(4000)
-
-            try:
-                await page.mouse.wheel(0, 250)
-                await page.wait_for_timeout(1000)
-                await page.mouse.wheel(0, -250)
-                await page.wait_for_timeout(1000)
-            except Exception:
-                pass
-
-            logger.info("STEP 7: Делаю screenshot.")
-
-            await page.screenshot(
-                path=screenshot_path,
-                full_page=False
-            )
-
-            return screenshot_path
-
-        finally:
-            if browser:
-                try:
-                    await browser.close()
-                except Exception:
-                    pass
+        except Exception as e:
+            logger.error(f"Не удалось обновить пост: {type(e).__name__}: {repr(e)}")
 
 
 # =========================
-# EXPORT HELPERS
-# =========================
-
-def create_export_json():
-    data = load_database()
-    export_path = os.path.join(DOWNLOAD_DIR, "referens_database.json")
-
-    with open(export_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-    return export_path
-
-
-def create_export_csv():
-    data = load_database()
-    export_path = os.path.join(DOWNLOAD_DIR, "referens_database.csv")
-
-    fields = [
-        "id",
-        "created_at",
-        "topic",
-        "platform",
-        "url",
-        "notes",
-        "priority",
-        "status",
-        "reminder",
-        "message_id",
-        "chat_id"
-    ]
-
-    with open(export_path, "w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fields)
-        writer.writeheader()
-
-        for item in data:
-            writer.writerow({
-                "id": item.get("id", ""),
-                "created_at": item.get("created_at", ""),
-                "topic": item.get("topic", ""),
-                "platform": item.get("platform", ""),
-                "url": item.get("url", ""),
-                "notes": item.get("notes", ""),
-                "priority": item.get("priority_label", item.get("priority", "")),
-                "status": item.get("status_label", item.get("status", "")),
-                "reminder": item.get("reminder_label", ""),
-                "message_id": item.get("message_id", ""),
-                "chat_id": item.get("chat_id", "")
-            })
-
-    return export_path
-
-
-# =========================
-# INFO TEXTS
-# =========================
-
-INFO_SHORT_TEXT = (
-    "ℹ️ Referens Bot\n\n"
-    "Главная функция бота — сохранять контент-референсы уже вместе с медиа, "
-    "твоими заметками, приоритетом, статусом и напоминаниями.\n\n"
-    "Отправь ссылку + свою мысль → выбери топик → выбери приоритет → бот сохранит референс в нужный раздел."
-)
-
-INFO_LONG_TEXT = (
-    "Что умеет бот:\n\n"
-    "🎬 Сохранять видео-референсы\n"
-    "Бот может скачать поддерживаемое видео из Instagram, TikTok, YouTube и других источников "
-    "и отправить его в выбранный топик.\n\n"
-    "💭 Сохранять твои заметки\n"
-    "Вместе с видео сохраняются твои мысли: что понравилось, как адаптировать идею, какой хук, стиль, монтаж или сценарий повторить.\n\n"
-    "📸 Делать скрин Instagram-аккаунтов\n"
-    "Если отправить ссылку на Instagram-профиль, бот делает мобильный скрин аккаунта и сохраняет его как референс.\n\n"
-    "📂 Раскладывать всё по топикам\n"
-    "Топики можно создавать, переименовывать и удалять прямо через бота.\n\n"
-    "⚡ Приоритет\n"
-    "🔥 High — использовать быстрее\n"
-    "⭐ Normal — обычная хорошая идея\n"
-    "🧊 Later — идея на потом\n\n"
-    "📌 Статус\n"
-    "🆕 New — новая идея\n"
-    "🟡 In Progress — в работе\n"
-    "✅ Done — сделано\n"
-    "❌ Not Suitable — не подходит\n\n"
-    "🔔 Напоминания\n"
-    "Можно поставить reminder на завтра, через 3 дня или через 7 дней.\n\n"
-    "📤 Export\n"
-    "Базу идей можно выгрузить в JSON или CSV.\n\n"
-    "Пример:\n"
-    "https://www.instagram.com/reel/... хороший хук, можно адаптировать под cowgirl-видео"
-)
-
-
-# =========================
-# MENU / COMMANDS
+# COMMANDS
 # =========================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1388,6 +434,18 @@ async def hide_panel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Панель скрыта ✅",
         reply_markup=ReplyKeyboardRemove()
     )
+
+
+async def test_reminder_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    item = {
+        "platform": "Instagram Reels",
+        "priority_label": "🔥 High",
+        "status_label": "🟡 In Progress",
+        "url": "https://www.instagram.com/reel/example/",
+        "notes": "Тестовое напоминание. Так будет выглядеть reminder, когда он придёт."
+    }
+
+    await update.message.reply_text(build_reminder_text(item))
 
 
 async def menu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1567,7 +625,7 @@ async def delete_topic_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================
-# CALLBACKS: MENU
+# MENU CALLBACK
 # =========================
 
 async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1640,7 +698,7 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "menu_check":
-        cookies_exists = os.path.exists(COOKIES_FILE)
+        cookies_exists = Path(COOKIES_FILE).exists()
         topics = load_topics()
         database = load_database()
         reminders = load_reminders()
@@ -1823,7 +881,7 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================
-# CALLBACKS: SAVE FLOW
+# SAVE / POST ACTION CALLBACKS
 # =========================
 
 async def save_priority_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1927,18 +985,26 @@ async def post_action_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     if data.startswith("post_reminder_set:"):
         _, reminder_key, item_id = data.split(":", 2)
 
-        option = REMINDER_OPTIONS.get(reminder_key)
-
-        if not option:
+        if reminder_key == "test":
+            seconds = 60
+            label = "🧪 Test — 1 min"
+        elif reminder_key.endswith("d") and reminder_key[:-1].isdigit():
+            days = int(reminder_key[:-1])
+            if days < 1 or days > 15:
+                await query.answer("Reminder must be from 1 to 15 days", show_alert=True)
+                return
+            seconds = days * 24 * 60 * 60
+            label = f"🔔 {days} day" if days == 1 else f"🔔 {days} days"
+        else:
             await query.answer("Unknown reminder", show_alert=True)
             return
 
-        due_ts = time.time() + option["seconds"]
-        add_reminder(item_id, query.from_user.id, due_ts, option["label"])
+        due_ts = time.time() + seconds
+        add_reminder(item_id, query.from_user.id, due_ts, label)
 
         item = update_database_item(item_id, {
             "reminder": reminder_key,
-            "reminder_label": option["label"],
+            "reminder_label": label,
             "reminder_due_ts": due_ts
         })
 
@@ -1947,7 +1013,7 @@ async def post_action_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             return
 
         await update_post_message(query, item)
-        await query.answer(f"Reminder set: {option['label']}", show_alert=False)
+        await query.answer(f"Reminder set: {label}", show_alert=False)
         return
 
 
@@ -2151,6 +1217,25 @@ async def process_content(update: Update, context: ContextTypes.DEFAULT_TYPE, te
     context.user_data["content"] = text
     set_pending_content(user_id, text)
 
+    url, _ = extract_url_and_thought(text)
+
+    if url and is_instagram_profile(url):
+        platform = "Instagram Profile"
+
+        if safe_file_exists(TOPICS_IMAGE):
+            with open(TOPICS_IMAGE, "rb") as photo:
+                await update.message.reply_photo(
+                    photo=photo,
+                    caption=f"📸 {platform}\n\n📌 Куда сохранить профиль?",
+                    reply_markup=build_topic_keyboard()
+                )
+        else:
+            await update.message.reply_text(
+                f"📸 {platform}\n\n📌 Куда сохранить профиль?",
+                reply_markup=build_topic_keyboard()
+            )
+        return
+
     if safe_file_exists(TOPICS_IMAGE):
         with open(TOPICS_IMAGE, "rb") as photo:
             await update.message.reply_photo(
@@ -2195,6 +1280,13 @@ async def on_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["selected_topic"] = topic
     context.user_data["selected_topic_icon"] = get_topic_icon(topic)
 
+    content = context.user_data.get("content") or get_pending_content(user_id)
+    url, _ = extract_url_and_thought(content or "")
+
+    if url and is_instagram_profile(url):
+        await save_selected_content(query, context)
+        return
+
     topic_icon = get_topic_icon(topic)
 
     try:
@@ -2234,42 +1326,32 @@ async def save_selected_content(query, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("Ошибка: ссылка не найдена.")
         return
 
+    url = normalize_instagram_url(url) if "instagram.com" in url.lower() else clean_url(url)
+
     platform = detect_platform(url)
     topic_id = get_topic_id(topic)
     topic_icon = get_topic_icon(topic)
 
-    priority_label = PRIORITIES.get(priority_key, PRIORITIES["normal"])["label"]
-    status_key = "new"
-    status_label = STATUSES[status_key]
-
     item_id = str(uuid.uuid4())
-
-    caption_text = build_caption(
-        platform,
-        url,
-        thought,
-        priority_label,
-        status_label
-    )
-
     media_path = None
     sent_message = None
 
     try:
-        loading_caption = (
-            f"⏳ Сохраняю референс...\n\n"
-            f"{topic_icon} {topic}\n"
-            f"⚡ Priority: {priority_label}\n"
-            f"🎬 {platform}"
-        )
-
-        try:
-            await query.edit_message_caption(caption=loading_caption)
-        except Exception:
-            await query.edit_message_text(loading_caption)
-
         if is_instagram_profile(url):
+            loading_caption = (
+                f"📸 Делаю скриншот профиля...\n\n"
+                f"{topic_icon} {topic}\n"
+                f"🎬 {platform}"
+            )
+
+            try:
+                await query.edit_message_caption(caption=loading_caption)
+            except Exception:
+                await query.edit_message_text(loading_caption)
+
             media_path = await make_instagram_profile_screenshot(url)
+
+            caption_text = build_profile_caption(url, thought)
 
             with open(media_path, "rb") as photo_file:
                 sent_message = await context.bot.send_photo(
@@ -2277,14 +1359,66 @@ async def save_selected_content(query, context: ContextTypes.DEFAULT_TYPE):
                     message_thread_id=topic_id,
                     photo=photo_file,
                     caption=caption_text,
-                    reply_markup=build_post_action_keyboard(item_id),
                     read_timeout=120,
                     write_timeout=120,
                     connect_timeout=120
                 )
 
+            success_caption = (
+                f"✅ Скриншот профиля сохранён\n\n"
+                f"{topic_icon} {topic}\n"
+                f"🎬 {platform}"
+            )
+
+            try:
+                await query.edit_message_caption(caption=success_caption)
+            except Exception:
+                await query.edit_message_text(success_caption)
+
+            db_item = {
+                "id": item_id,
+                "created_at": current_timestamp(),
+                "updated_at": current_timestamp(),
+                "type": "instagram_profile",
+                "topic": topic,
+                "topic_id": topic_id,
+                "topic_icon": topic_icon,
+                "platform": platform,
+                "username": extract_instagram_username(url),
+                "url": url,
+                "notes": thought,
+                "chat_id": CHAT_ID,
+                "message_id": sent_message.message_id if sent_message else None
+            }
+
+            add_database_item(db_item)
+
         else:
+            priority_label = PRIORITIES.get(priority_key, PRIORITIES["normal"])["label"]
+            status_key = "new"
+            status_label = STATUSES[status_key]
+
+            loading_caption = (
+                f"⏳ Скачиваю видео...\n\n"
+                f"{topic_icon} {topic}\n"
+                f"⚡ Priority: {priority_label}\n"
+                f"🎬 {platform}"
+            )
+
+            try:
+                await query.edit_message_caption(caption=loading_caption)
+            except Exception:
+                await query.edit_message_text(loading_caption)
+
             media_path = await download_video(url)
+
+            caption_text = build_video_caption(
+                platform,
+                url,
+                thought,
+                priority_label,
+                status_label
+            )
 
             with open(media_path, "rb") as video_file:
                 sent_message = await context.bot.send_video(
@@ -2299,70 +1433,23 @@ async def save_selected_content(query, context: ContextTypes.DEFAULT_TYPE):
                     connect_timeout=120
                 )
 
-        success_caption = (
-            f"✅ Референс сохранён\n\n"
-            f"{topic_icon} {topic}\n"
-            f"⚡ Priority: {priority_label}\n"
-            f"🎬 {platform}"
-        )
-
-        try:
-            await query.edit_message_caption(caption=success_caption)
-        except Exception:
-            await query.edit_message_text(success_caption)
-
-        db_item = {
-            "id": item_id,
-            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "topic": topic,
-            "topic_id": topic_id,
-            "topic_icon": topic_icon,
-            "platform": platform,
-            "url": url,
-            "notes": thought,
-            "priority": priority_key,
-            "priority_label": priority_label,
-            "status": status_key,
-            "status_label": status_label,
-            "reminder": None,
-            "reminder_label": None,
-            "chat_id": CHAT_ID,
-            "message_id": sent_message.message_id if sent_message else None
-        }
-
-        add_database_item(db_item)
-
-        context.user_data.pop("content", None)
-        context.user_data.pop("selected_topic", None)
-        context.user_data.pop("selected_topic_icon", None)
-        context.user_data.pop("selected_priority", None)
-        clear_pending_content(user_id)
-
-    except Exception as e:
-        logger.error(f"Ошибка обработки медиа: {type(e).__name__}: {repr(e)}")
-
-        fallback_text = (
-            f"🎬 {platform}\n\n"
-            f"⚡ Priority: {priority_label}\n"
-            f"📌 Status: {status_label}\n\n"
-            f"🔗 Link:\n{url}\n\n"
-            f"💭 Notes:\n{thought}\n\n"
-            f"⚠️ Медиа не удалось обработать автоматически."
-        )
-
-        try:
-            sent_message = await context.bot.send_message(
-                chat_id=CHAT_ID,
-                message_thread_id=topic_id,
-                text=fallback_text,
-                reply_markup=build_post_action_keyboard(item_id)
+            success_caption = (
+                f"✅ Видео сохранено\n\n"
+                f"{topic_icon} {topic}\n"
+                f"⚡ Priority: {priority_label}\n"
+                f"🎬 {platform}"
             )
+
+            try:
+                await query.edit_message_caption(caption=success_caption)
+            except Exception:
+                await query.edit_message_text(success_caption)
 
             db_item = {
                 "id": item_id,
-                "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "created_at": current_timestamp(),
+                "updated_at": current_timestamp(),
+                "type": "video_reference",
                 "topic": topic,
                 "topic_id": topic_id,
                 "topic_icon": topic_icon,
@@ -2376,18 +1463,104 @@ async def save_selected_content(query, context: ContextTypes.DEFAULT_TYPE):
                 "reminder": None,
                 "reminder_label": None,
                 "chat_id": CHAT_ID,
-                "message_id": sent_message.message_id if sent_message else None,
-                "media_failed": True
+                "message_id": sent_message.message_id if sent_message else None
             }
 
             add_database_item(db_item)
 
-            fail_caption = (
-                f"⚠️ Медиа не обработалось, но пост сохранён текстом.\n\n"
-                f"{topic_icon} {topic}\n"
-                f"⚡ Priority: {priority_label}\n"
-                f"🎬 {platform}"
-            )
+        context.user_data.pop("content", None)
+        context.user_data.pop("selected_topic", None)
+        context.user_data.pop("selected_topic_icon", None)
+        context.user_data.pop("selected_priority", None)
+        clear_pending_content(user_id)
+
+    except Exception as e:
+        logger.error(f"Ошибка обработки медиа: {type(e).__name__}: {repr(e)}")
+
+        try:
+            if is_instagram_profile(url):
+                fallback_text = build_profile_caption(url, thought)
+
+                sent_message = await context.bot.send_message(
+                    chat_id=CHAT_ID,
+                    message_thread_id=topic_id,
+                    text=fallback_text
+                )
+
+                db_item = {
+                    "id": item_id,
+                    "created_at": current_timestamp(),
+                    "updated_at": current_timestamp(),
+                    "type": "instagram_profile",
+                    "topic": topic,
+                    "topic_id": topic_id,
+                    "topic_icon": topic_icon,
+                    "platform": platform,
+                    "username": extract_instagram_username(url),
+                    "url": url,
+                    "notes": thought,
+                    "chat_id": CHAT_ID,
+                    "message_id": sent_message.message_id if sent_message else None,
+                    "media_failed": True
+                }
+
+                fail_caption = (
+                    f"⚠️ Скриншот профиля не обработался, но профиль сохранён текстом.\n\n"
+                    f"{topic_icon} {topic}\n"
+                    f"🎬 {platform}"
+                )
+
+            else:
+                priority_label = PRIORITIES.get(priority_key, PRIORITIES["normal"])["label"]
+                status_key = "new"
+                status_label = STATUSES[status_key]
+
+                fallback_text = (
+                    f"🎬 {platform}\n\n"
+                    f"⚡ Priority: {priority_label}\n"
+                    f"📌 Status: {status_label}\n\n"
+                    f"🔗 Link:\n{url}\n\n"
+                    f"💭 Notes:\n{thought}\n\n"
+                    f"⚠️ Медиа не удалось обработать автоматически."
+                )
+
+                sent_message = await context.bot.send_message(
+                    chat_id=CHAT_ID,
+                    message_thread_id=topic_id,
+                    text=fallback_text,
+                    reply_markup=build_post_action_keyboard(item_id)
+                )
+
+                db_item = {
+                    "id": item_id,
+                    "created_at": current_timestamp(),
+                    "updated_at": current_timestamp(),
+                    "type": "video_reference",
+                    "topic": topic,
+                    "topic_id": topic_id,
+                    "topic_icon": topic_icon,
+                    "platform": platform,
+                    "url": url,
+                    "notes": thought,
+                    "priority": priority_key,
+                    "priority_label": priority_label,
+                    "status": status_key,
+                    "status_label": status_label,
+                    "reminder": None,
+                    "reminder_label": None,
+                    "chat_id": CHAT_ID,
+                    "message_id": sent_message.message_id if sent_message else None,
+                    "media_failed": True
+                }
+
+                fail_caption = (
+                    f"⚠️ Видео не обработалось, но пост сохранён текстом.\n\n"
+                    f"{topic_icon} {topic}\n"
+                    f"⚡ Priority: {priority_label}\n"
+                    f"🎬 {platform}"
+                )
+
+            add_database_item(db_item)
 
             try:
                 await query.edit_message_caption(caption=fail_caption)
@@ -2428,21 +1601,21 @@ async def chat_id_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def check_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    cookies_exists = os.path.exists(COOKIES_FILE)
+    cookies_exists = Path(COOKIES_FILE).exists()
     topics = load_topics()
     database = load_database()
     reminders = load_reminders()
 
     await update.message.reply_text(
         f"Cookies file: {'✅ найден' if cookies_exists else '❌ не найден'}\n"
-        f"Cookies path: {os.path.abspath(COOKIES_FILE)}\n"
-        f"Topics file: {os.path.abspath(TOPICS_FILE)}\n"
+        f"Cookies path: {Path(COOKIES_FILE).resolve()}\n"
+        f"Topics file: {Path(TOPICS_FILE).resolve()}\n"
         f"Topics count: {len(topics)}\n"
-        f"Database file: {os.path.abspath(DATABASE_FILE)}\n"
+        f"Database file: {Path(DATABASE_FILE).resolve()}\n"
         f"Database items: {len(database)}\n"
-        f"Reminders file: {os.path.abspath(REMINDERS_FILE)}\n"
+        f"Reminders file: {Path(REMINDERS_FILE).resolve()}\n"
         f"Reminders count: {len(reminders)}\n"
-        f"Download dir: {os.path.abspath(DOWNLOAD_DIR)}\n"
+        f"Download dir: {Path(DOWNLOAD_DIR).resolve()}\n"
         f"Docker mode: ✅ Playwright enabled"
     )
 
@@ -2455,10 +1628,19 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
 # MAIN
 # =========================
 
+async def post_init(application):
+    application.create_task(reminders_loop(application))
+
+
 def main():
     if not BOT_TOKEN:
         raise ValueError(
             "BOT_TOKEN не найден. Добавь BOT_TOKEN в Environment Variables на Render."
+        )
+
+    if not CHAT_ID:
+        raise ValueError(
+            "CHAT_ID не найден. Добавь CHAT_ID в Environment Variables на Render."
         )
 
     threading.Thread(target=run_web_server, daemon=True).start()
@@ -2468,6 +1650,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("panel", panel_cmd))
     app.add_handler(CommandHandler("hidepanel", hide_panel_cmd))
+    app.add_handler(CommandHandler("testreminder", test_reminder_cmd))
     app.add_handler(CommandHandler("menu", menu_cmd))
     app.add_handler(CommandHandler("save", save_cmd))
     app.add_handler(CommandHandler("topics", topics_cmd))
