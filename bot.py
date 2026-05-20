@@ -361,7 +361,7 @@ async def click_continue_if_needed(page):
 
 async def close_instagram_popups(page):
     """
-    Быстро закрывает Instagram popup окна.
+    Закрывает Instagram popup окна.
     """
 
     await click_continue_if_needed(page)
@@ -378,12 +378,14 @@ async def close_instagram_popups(page):
     for selector in quick_selectors:
         try:
             await page.locator(selector).first.click(timeout=1200)
+            logger.info(f"Закрыл popup через selector: {selector}")
             await page.wait_for_timeout(700)
         except Exception:
             pass
 
     try:
         await page.get_by_role("button", name=re.compile("Not now", re.I)).click(timeout=1200)
+        logger.info("Закрыл popup через role Not now.")
         await page.wait_for_timeout(700)
     except Exception:
         pass
@@ -399,6 +401,36 @@ async def close_instagram_popups(page):
         await page.wait_for_timeout(500)
     except Exception:
         pass
+
+
+async def prepare_instagram_session(page):
+    """
+    Сначала открывает главную Instagram,
+    нажимает Continue, если нужно,
+    закрывает popup'ы.
+    """
+
+    try:
+        logger.info("Открываю главную Instagram для подготовки сессии.")
+        await page.goto(
+            "https://www.instagram.com/",
+            wait_until="domcontentloaded",
+            timeout=30000
+        )
+
+        await page.wait_for_timeout(3000)
+
+        did_continue = await click_continue_if_needed(page)
+
+        await close_instagram_popups(page)
+
+        await page.wait_for_timeout(1500)
+
+        return did_continue
+
+    except Exception as e:
+        logger.warning(f"Не удалось подготовить Instagram session: {type(e).__name__}: {repr(e)}")
+        return False
 
 
 async def make_instagram_profile_screenshot(url: str):
@@ -437,43 +469,58 @@ async def make_instagram_profile_screenshot(url: str):
 
         page = await context.new_page()
 
-        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-        await page.wait_for_timeout(2500)
+        # ШАГ 1: Подготовить Instagram-сессию на главной
+        await prepare_instagram_session(page)
 
-        # 1. Закрываем/проходим первый экран
-        did_continue = await click_continue_if_needed(page)
+        # ШАГ 2: Открыть нужный профиль
+        logger.info(f"Открываю нужный Instagram профиль: {url}")
+
+        await page.goto(
+            url,
+            wait_until="domcontentloaded",
+            timeout=30000
+        )
+
+        await page.wait_for_timeout(4000)
+
+        # ШАГ 3: Если опять появился Continue/Popup — закрываем
         await close_instagram_popups(page)
 
-        # 2. Если был экран Continue/Login, заново открываем нужный профиль
+        # ШАГ 4: Если после popup нас кинуло на accounts/login, снова открываем профиль
         try:
             current_url = page.url.lower()
 
             if (
-                did_continue
-                or "accounts" in current_url
+                "accounts" in current_url
                 or "login" in current_url
                 or "onetap" in current_url
                 or "challenge" in current_url
             ):
-                logger.info("После Continue заново открываю профиль.")
-                await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                await page.wait_for_timeout(3500)
+                logger.info("Instagram перекинул на login/accounts. Повторно открываю профиль.")
+                await page.goto(
+                    url,
+                    wait_until="domcontentloaded",
+                    timeout=30000
+                )
+
+                await page.wait_for_timeout(4000)
                 await close_instagram_popups(page)
 
         except Exception as e:
-            logger.warning(f"Не удалось повторно открыть профиль после Continue: {e}")
+            logger.warning(f"Не удалось повторно открыть профиль: {type(e).__name__}: {repr(e)}")
 
-        # 3. Легкая прокрутка, чтобы профиль догрузился
+        # ШАГ 5: Небольшая прокрутка, чтобы профиль догрузился
         try:
-            await page.mouse.wheel(0, 200)
-            await page.wait_for_timeout(500)
-            await page.mouse.wheel(0, -200)
-            await page.wait_for_timeout(500)
+            await page.mouse.wheel(0, 250)
+            await page.wait_for_timeout(700)
+            await page.mouse.wheel(0, -250)
+            await page.wait_for_timeout(700)
         except Exception:
             pass
 
         await page.wait_for_timeout(1500)
 
+        # ШАГ 6: Скрин
         await page.screenshot(
             path=screenshot_path,
             full_page=False
@@ -590,7 +637,7 @@ async def on_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             media_path = await asyncio.wait_for(
                 make_instagram_profile_screenshot(url),
-                timeout=50
+                timeout=90
             )
 
             with open(media_path, "rb") as photo_file:
