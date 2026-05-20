@@ -327,6 +327,83 @@ async def download_video(url: str):
 # SCREENSHOT WITH PLAYWRIGHT
 # =========================
 
+async def close_instagram_popups(page):
+    """
+    Пытается закрыть Instagram popup окна:
+    Save your login info, Not now, cookies, крестик и другие модалки.
+    """
+
+    # 1. Пробуем закрыть по тексту кнопок
+    popup_texts = [
+        "Not now",
+        "Not Now",
+        "Not now.",
+        "Maybe later",
+        "Allow all cookies",
+        "Accept all",
+        "Accept",
+        "Save info",
+        "Save your login info?"
+    ]
+
+    for text in popup_texts:
+        try:
+            await page.get_by_text(text, exact=False).click(timeout=2500)
+            await page.wait_for_timeout(1500)
+        except Exception:
+            pass
+
+    # 2. Отдельно пробуем locator по тексту Not now
+    try:
+        await page.locator("text=Not now").click(timeout=3000)
+        await page.wait_for_timeout(2000)
+    except Exception:
+        pass
+
+    try:
+        await page.locator("text=Not Now").click(timeout=3000)
+        await page.wait_for_timeout(2000)
+    except Exception:
+        pass
+
+    # 3. Пробуем role button
+    try:
+        await page.get_by_role("button", name=re.compile("Not now", re.I)).click(timeout=3000)
+        await page.wait_for_timeout(2000)
+    except Exception:
+        pass
+
+    try:
+        await page.get_by_role("button", name=re.compile("Not Now", re.I)).click(timeout=3000)
+        await page.wait_for_timeout(2000)
+    except Exception:
+        pass
+
+    # 4. Пробуем Escape
+    try:
+        await page.keyboard.press("Escape")
+        await page.wait_for_timeout(1500)
+    except Exception:
+        pass
+
+    # 5. Пробуем кликнуть по крестику справа сверху.
+    # Viewport 390x844 с device_scale_factor=2.
+    # Координаты клика в CSS px, поэтому крестик примерно справа сверху: x=358, y=65.
+    possible_close_points = [
+        (358, 65),
+        (360, 70),
+        (350, 60),
+        (365, 58)
+    ]
+
+    for x, y in possible_close_points:
+        try:
+            await page.mouse.click(x, y)
+            await page.wait_for_timeout(1500)
+        except Exception:
+            pass
+
+
 async def make_instagram_profile_screenshot(url: str):
     screenshot_id = str(uuid.uuid4())
     screenshot_path = os.path.join(DOWNLOAD_DIR, f"{screenshot_id}.png")
@@ -366,21 +443,19 @@ async def make_instagram_profile_screenshot(url: str):
         await page.goto(url, wait_until="domcontentloaded", timeout=60000)
         await page.wait_for_timeout(7000)
 
-        popup_texts = [
-            "Not now",
-            "Not Now",
-            "Allow all cookies",
-            "Accept all",
-            "Accept",
-            "Maybe later"
-        ]
+        # Закрываем popup'ы несколько раз, потому что Instagram иногда показывает их не сразу
+        await close_instagram_popups(page)
+        await page.wait_for_timeout(2000)
+        await close_instagram_popups(page)
 
-        for text in popup_texts:
-            try:
-                await page.get_by_text(text, exact=False).click(timeout=2000)
-                await page.wait_for_timeout(1000)
-            except Exception:
-                pass
+        # Небольшая прокрутка вниз-вверх, чтобы профиль догрузился
+        try:
+            await page.mouse.wheel(0, 300)
+            await page.wait_for_timeout(1500)
+            await page.mouse.wheel(0, -300)
+            await page.wait_for_timeout(1500)
+        except Exception:
+            pass
 
         await page.wait_for_timeout(3000)
 
@@ -429,6 +504,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def process_content(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
+    # Если пользователь отправил текст без ссылки — бот молчит
     if not has_link(text):
         return
 
