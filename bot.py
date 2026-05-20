@@ -4,10 +4,11 @@ import os
 import re
 import uuid
 import asyncio
+import threading
 from pathlib import Path
-from datetime import datetime
 
 import yt_dlp
+from flask import Flask
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -20,6 +21,27 @@ from telegram.ext import (
 )
 
 
+# =========================
+# WEB SERVER FOR RENDER
+# =========================
+
+web_app = Flask(__name__)
+
+
+@web_app.route("/")
+def home():
+    return "Bot is running!"
+
+
+def run_web_server():
+    port = int(os.environ.get("PORT", 10000))
+    web_app.run(host="0.0.0.0", port=port)
+
+
+# =========================
+# LOGGING
+# =========================
+
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
@@ -28,8 +50,16 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+# =========================
+# CONFIG
+# =========================
+
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHAT_ID = -3794802790
+
+# ВАЖНО:
+# Это ID твоей супергруппы для Bot API.
+# Из ссылки https://t.me/c/3794802790/... получается -1003794802790
+CHAT_ID = -1003794802790
 
 TOPICS = ["CowGirl", "Student", "Meme", "Telegram", "X", "Threads"]
 
@@ -39,6 +69,10 @@ DOWNLOAD_DIR = "downloads"
 
 Path(DOWNLOAD_DIR).mkdir(exist_ok=True)
 
+
+# =========================
+# FILE HELPERS
+# =========================
 
 def load_counter():
     if os.path.exists(COUNTER_FILE):
@@ -53,7 +87,7 @@ def load_counter():
             return data
 
         except Exception as e:
-            logger.error(f"Ошибка counter.json: {e}")
+            logger.error(f"Ошибка чтения counter.json: {e}")
             return {topic: 0 for topic in TOPICS}
 
     return {topic: 0 for topic in TOPICS}
@@ -72,14 +106,19 @@ def load_pending():
         try:
             with open(PENDING_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except Exception:
+        except Exception as e:
+            logger.error(f"Ошибка чтения pending.json: {e}")
             return {}
+
     return {}
 
 
 def save_pending(data):
-    with open(PENDING_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    try:
+        with open(PENDING_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error(f"Ошибка сохранения pending.json: {e}")
 
 
 def set_pending_content(user_id, content):
@@ -98,6 +137,10 @@ def clear_pending_content(user_id):
     data.pop(str(user_id), None)
     save_pending(data)
 
+
+# =========================
+# TELEGRAM HELPERS
+# =========================
 
 def get_topic_id(name):
     mapping = {
@@ -155,6 +198,10 @@ def build_topic_keyboard():
     return InlineKeyboardMarkup(keyboard)
 
 
+# =========================
+# VIDEO DOWNLOAD
+# =========================
+
 def download_video_sync(url: str):
     video_id = str(uuid.uuid4())
     output_template = os.path.join(DOWNLOAD_DIR, f"{video_id}.%(ext)s")
@@ -187,24 +234,29 @@ async def download_video(url: str):
     return await asyncio.to_thread(download_video_sync, url)
 
 
+# =========================
+# BOT HANDLERS
+# =========================
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Привет! Просто отправь мне ссылку и мысли одним сообщением.\n\n"
+        "Привет 👋\n\n"
+        "Просто отправь мне ссылку и мысли одним сообщением.\n\n"
         "Пример:\n"
-        "https://www.tiktok.com/... идея для поста"
+        "https://www.tiktok.com/... идея для поста\n\n"
+        "После этого выбери топик, и я сохраню пост."
     )
 
 
 async def save_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text(
-            "Ошибка! Используй:\n\n"
-            "/save [ссылка] [мысли]"
+            "Ошибка. Используй так:\n\n"
+            "/save https://example.com твои мысли"
         )
         return
 
     text = " ".join(context.args).strip()
-
     await process_content(update, context, text)
 
 
@@ -213,7 +265,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     text = update.message.text.strip()
-
     await process_content(update, context, text)
 
 
@@ -232,7 +283,7 @@ async def process_content(update: Update, context: ContextTypes.DEFAULT_TYPE, te
     set_pending_content(user_id, text)
 
     await update.message.reply_text(
-        "Выбери топик:",
+        "Куда сохранить этот пост?",
         reply_markup=build_topic_keyboard()
     )
 
@@ -249,7 +300,7 @@ async def on_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await query.edit_message_text(
             "❌ Отменено.\n\n"
-            "Можешь отправить ссылку заново."
+            "Можешь отправить новую ссылку."
         )
         return
 
@@ -288,7 +339,8 @@ async def on_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.edit_message_text(
         f"⏳ Скачиваю видео...\n\n"
-        f"Топик: {topic}"
+        f"Топик: {topic}\n"
+        f"Post #{post_number}"
     )
 
     video_path = None
@@ -296,31 +348,33 @@ async def on_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         video_path = await download_video(url)
 
-        if topic_id is not None:
-            await context.bot.send_video(
-                chat_id=CHAT_ID,
-                message_thread_id=topic_id,
-                video=open(video_path, "rb"),
-                caption=caption_text,
-                supports_streaming=True,
-                read_timeout=120,
-                write_timeout=120,
-                connect_timeout=120
-            )
-        else:
-            await context.bot.send_video(
-                chat_id=CHAT_ID,
-                video=open(video_path, "rb"),
-                caption=caption_text,
-                supports_streaming=True,
-                read_timeout=120,
-                write_timeout=120,
-                connect_timeout=120
-            )
+        with open(video_path, "rb") as video_file:
+            if topic_id is not None:
+                await context.bot.send_video(
+                    chat_id=CHAT_ID,
+                    message_thread_id=topic_id,
+                    video=video_file,
+                    caption=caption_text,
+                    supports_streaming=True,
+                    read_timeout=120,
+                    write_timeout=120,
+                    connect_timeout=120
+                )
+            else:
+                await context.bot.send_video(
+                    chat_id=CHAT_ID,
+                    video=video_file,
+                    caption=caption_text,
+                    supports_streaming=True,
+                    read_timeout=120,
+                    write_timeout=120,
+                    connect_timeout=120
+                )
 
         await query.edit_message_text(
-            f"✅ Видео сохранено в {topic}\n"
-            f"📌 Post #{post_number}"
+            f"✅ Видео сохранено\n\n"
+            f"📌 Post #{post_number}\n"
+            f"📂 {topic}"
         )
 
         context.user_data.pop("content", None)
@@ -350,8 +404,9 @@ async def on_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
 
             await query.edit_message_text(
-                f"⚠️ Видео не скачалось, но пост сохранен текстом.\n"
-                f"📌 Post #{post_number}"
+                f"⚠️ Видео не скачалось, но пост сохранен текстом.\n\n"
+                f"📌 Post #{post_number}\n"
+                f"📂 {topic}"
             )
 
             context.user_data.pop("content", None)
@@ -369,19 +424,40 @@ async def on_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
 
 
+async def chat_id_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    thread_id = update.message.message_thread_id
+
+    await update.message.reply_text(
+        f"Chat ID: {chat.id}\n"
+        f"Chat type: {chat.type}\n"
+        f"Thread ID: {thread_id}"
+    )
+
+
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"Update {update} caused error: {context.error}")
 
 
+# =========================
+# MAIN
+# =========================
+
 def main():
     if not BOT_TOKEN:
-        raise ValueError("BOT_TOKEN не найден. Укажи его в переменных окружения.")
+        raise ValueError("BOT_TOKEN не найден. Добавь BOT_TOKEN в Environment Variables на Render.")
+
+    # Для Render Web Service
+    threading.Thread(target=run_web_server, daemon=True).start()
 
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("save", save_cmd))
+    app.add_handler(CommandHandler("id", chat_id_cmd))
+
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
     app.add_handler(CallbackQueryHandler(on_topic, pattern="^(t_|cancel)"))
 
     app.add_error_handler(error_handler)
