@@ -56,9 +56,6 @@ logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# ВАЖНО:
-# Это ID твоей супергруппы для Bot API.
-# Из ссылки https://t.me/c/3794802790/... получается -1003794802790
 CHAT_ID = -1003794802790
 
 TOPICS = ["CowGirl", "Student", "Meme", "Telegram", "X", "Threads"]
@@ -66,6 +63,7 @@ TOPICS = ["CowGirl", "Student", "Meme", "Telegram", "X", "Threads"]
 COUNTER_FILE = "counter.json"
 PENDING_FILE = "pending.json"
 DOWNLOAD_DIR = "downloads"
+COOKIES_FILE = "cookies.txt"
 
 Path(DOWNLOAD_DIR).mkdir(exist_ok=True)
 
@@ -210,10 +208,17 @@ def download_video_sync(url: str):
         "outtmpl": output_template,
         "format": "best[ext=mp4]/best",
         "noplaylist": True,
-        "quiet": True,
-        "no_warnings": True,
+        "quiet": False,
+        "no_warnings": False,
         "max_filesize": 48 * 1024 * 1024,
+        "merge_output_format": "mp4",
     }
+
+    if os.path.exists(COOKIES_FILE):
+        logger.info("cookies.txt найден. Использую cookies для yt-dlp.")
+        ydl_opts["cookiefile"] = COOKIES_FILE
+    else:
+        logger.warning("cookies.txt не найден. Instagram может не скачаться.")
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
@@ -243,7 +248,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Привет 👋\n\n"
         "Просто отправь мне ссылку и мысли одним сообщением.\n\n"
         "Пример:\n"
-        "https://www.tiktok.com/... идея для поста\n\n"
+        "https://www.instagram.com/reel/... идея для поста\n\n"
         "После этого выбери топик, и я сохраню пост."
     )
 
@@ -447,7 +452,6 @@ def main():
     if not BOT_TOKEN:
         raise ValueError("BOT_TOKEN не найден. Добавь BOT_TOKEN в Environment Variables на Render.")
 
-    # Для Render Web Service
     threading.Thread(target=run_web_server, daemon=True).start()
 
     app = Application.builder().token(BOT_TOKEN).build()
