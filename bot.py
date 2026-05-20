@@ -327,10 +327,44 @@ async def download_video(url: str):
 # SCREENSHOT WITH PLAYWRIGHT
 # =========================
 
+async def click_continue_if_needed(page):
+    """
+    Нажимает Continue / Continue as, если Instagram показывает экран выбора аккаунта.
+    """
+
+    continue_selectors = [
+        "text=Continue",
+        "text=Continue as",
+        "button:has-text('Continue')",
+        "button:has-text('Continue as')"
+    ]
+
+    for selector in continue_selectors:
+        try:
+            await page.locator(selector).first.click(timeout=2500)
+            logger.info(f"Нажал Continue через selector: {selector}")
+            await page.wait_for_timeout(4000)
+            return True
+        except Exception:
+            pass
+
+    try:
+        await page.get_by_role("button", name=re.compile("Continue", re.I)).click(timeout=3000)
+        logger.info("Нажал Continue через role button.")
+        await page.wait_for_timeout(4000)
+        return True
+    except Exception:
+        pass
+
+    return False
+
+
 async def close_instagram_popups(page):
     """
     Быстро закрывает Instagram popup окна.
     """
+
+    await click_continue_if_needed(page)
 
     quick_selectors = [
         "text=Not now",
@@ -343,16 +377,14 @@ async def close_instagram_popups(page):
 
     for selector in quick_selectors:
         try:
-            await page.locator(selector).click(timeout=1000)
-            await page.wait_for_timeout(500)
-            return
+            await page.locator(selector).first.click(timeout=1200)
+            await page.wait_for_timeout(700)
         except Exception:
             pass
 
     try:
-        await page.get_by_role("button", name=re.compile("Not now", re.I)).click(timeout=1000)
-        await page.wait_for_timeout(500)
-        return
+        await page.get_by_role("button", name=re.compile("Not now", re.I)).click(timeout=1200)
+        await page.wait_for_timeout(700)
     except Exception:
         pass
 
@@ -406,10 +438,32 @@ async def make_instagram_profile_screenshot(url: str):
         page = await context.new_page()
 
         await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-        await page.wait_for_timeout(3000)
+        await page.wait_for_timeout(2500)
 
+        # 1. Закрываем/проходим первый экран
+        did_continue = await click_continue_if_needed(page)
         await close_instagram_popups(page)
 
+        # 2. Если был экран Continue/Login, заново открываем нужный профиль
+        try:
+            current_url = page.url.lower()
+
+            if (
+                did_continue
+                or "accounts" in current_url
+                or "login" in current_url
+                or "onetap" in current_url
+                or "challenge" in current_url
+            ):
+                logger.info("После Continue заново открываю профиль.")
+                await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                await page.wait_for_timeout(3500)
+                await close_instagram_popups(page)
+
+        except Exception as e:
+            logger.warning(f"Не удалось повторно открыть профиль после Continue: {e}")
+
+        # 3. Легкая прокрутка, чтобы профиль догрузился
         try:
             await page.mouse.wheel(0, 200)
             await page.wait_for_timeout(500)
@@ -536,7 +590,7 @@ async def on_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             media_path = await asyncio.wait_for(
                 make_instagram_profile_screenshot(url),
-                timeout=45
+                timeout=50
             )
 
             with open(media_path, "rb") as photo_file:
