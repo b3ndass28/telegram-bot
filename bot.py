@@ -84,6 +84,32 @@ def has_link(text: str) -> bool:
     return "http://" in text or "https://" in text
 
 
+def build_topic_keyboard():
+    """Создает кнопки топиков сеткой + кнопку отмены"""
+
+    buttons_per_row = 3
+    keyboard = []
+
+    for i in range(0, len(TOPICS), buttons_per_row):
+        row = []
+
+        for topic in TOPICS[i:i + buttons_per_row]:
+            row.append(
+                InlineKeyboardButton(
+                    topic,
+                    callback_data=f"t_{topic}"
+                )
+            )
+
+        keyboard.append(row)
+
+    keyboard.append([
+        InlineKeyboardButton("❌ Отмена", callback_data="cancel")
+    ])
+
+    return InlineKeyboardMarkup(keyboard)
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /start"""
     await update.message.reply_text(
@@ -136,22 +162,27 @@ async def process_content(update: Update, context: ContextTypes.DEFAULT_TYPE, te
 
     context.user_data["content"] = text
 
-    keyboard = [
-        [InlineKeyboardButton(topic, callback_data=f"t_{topic}")]
-        for topic in TOPICS
-    ]
-
     await update.message.reply_text(
         "Выбери топик:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        reply_markup=build_topic_keyboard()
     )
 
 
 async def on_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка выбора топика"""
+    """Обработка выбора топика или отмены"""
 
     query = update.callback_query
     await query.answer()
+
+    # Отмена процесса
+    if query.data == "cancel":
+        context.user_data.pop("content", None)
+
+        await query.edit_message_text(
+            "❌ Отменено.\n\n"
+            "Можешь отправить ссылку заново."
+        )
+        return
 
     topic = query.data.replace("t_", "")
 
@@ -232,10 +263,9 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("save", save_cmd))
 
-    # Обычные сообщения без /save
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    app.add_handler(CallbackQueryHandler(on_topic, pattern="^t_"))
+    app.add_handler(CallbackQueryHandler(on_topic, pattern="^(t_|cancel)"))
 
     app.add_error_handler(error_handler)
 
