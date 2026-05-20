@@ -64,18 +64,24 @@ from helpers import (
     clean_url,
     normalize_instagram_url,
     extract_instagram_username,
+    extract_profile_username,
     detect_platform,
     is_instagram_profile,
+    is_tiktok_profile,
+    is_x_profile,
+    is_threads_profile,
+    is_social_profile,
     safe_file_exists,
     build_video_caption,
     build_profile_caption,
     build_reminder_text,
+    remove_active_reminders_for_item,
     current_timestamp,
     send_photo_or_text_message,
     edit_or_send_photo,
     safe_edit_message,
     download_video,
-    make_instagram_profile_screenshot,
+    make_profile_screenshot,
     create_export_json,
     create_export_csv,
 )
@@ -128,7 +134,7 @@ INFO_LONG_TEXT = (
     "💭 Сохранять твои заметки\n"
     "Вместе с видео сохраняются твои мысли: что понравилось, как адаптировать идею, какой хук, стиль, монтаж или сценарий повторить.\n\n"
     "📸 Делать скрин Instagram-аккаунтов\n"
-    "Если отправить ссылку на Instagram-профиль, бот делает мобильный скрин аккаунта и сохраняет его как референс без priority/status/reminder.\n\n"
+    "Если отправить ссылку на Instagram, TikTok, X или Threads профиль, бот делает скрин аккаунта и сохраняет его как референс без priority/status/reminder.\n\n"
     "📂 Раскладывать всё по топикам\n"
     "Топики можно создавать, переименовывать и удалять прямо через бота.\n\n"
     "⚡ Приоритет\n"
@@ -326,6 +332,10 @@ def build_reminder_manage_keyboard(item_id):
                 )
             )
         keyboard.append(row)
+
+    keyboard.append([
+        InlineKeyboardButton("🗑 Remove reminder", callback_data=f"post_reminder_remove:{item_id}")
+    ])
 
     keyboard.append([
         InlineKeyboardButton("⬅️ Назад", callback_data=f"post_back:{item_id}")
@@ -982,6 +992,25 @@ async def post_action_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         await update_post_message(query, item)
         return
 
+    if data.startswith("post_reminder_remove:"):
+        item_id = data.split(":", 1)[1]
+
+        remove_active_reminders_for_item(item_id)
+
+        item = update_database_item(item_id, {
+            "reminder": None,
+            "reminder_label": None,
+            "reminder_due_ts": None
+        })
+
+        if not item:
+            await query.answer("Item not found", show_alert=True)
+            return
+
+        await update_post_message(query, item)
+        await query.answer("Reminder removed", show_alert=False)
+        return
+
     if data.startswith("post_reminder_set:"):
         _, reminder_key, item_id = data.split(":", 2)
 
@@ -1039,6 +1068,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = update.message.text.strip()
     mode = context.user_data.get("mode")
+    user_id = update.effective_user.id
+
+    if context.application.bot_data.get(f"processing_{user_id}") and has_link(text):
+        await update.message.reply_text(
+            "⏳ Пожалуйста, подожди. Сейчас бот уже обрабатывает предыдущий референс."
+        )
+        return
 
     if text == "📂 Topics":
         await topics_cmd(update, context)
@@ -1219,8 +1255,8 @@ async def process_content(update: Update, context: ContextTypes.DEFAULT_TYPE, te
 
     url, _ = extract_url_and_thought(text)
 
-    if url and is_instagram_profile(url):
-        platform = "Instagram Profile"
+    if url and is_social_profile(url):
+        platform = detect_platform(url)
 
         if safe_file_exists(TOPICS_IMAGE):
             with open(TOPICS_IMAGE, "rb") as photo:
@@ -1283,7 +1319,7 @@ async def on_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
     content = context.user_data.get("content") or get_pending_content(user_id)
     url, _ = extract_url_and_thought(content or "")
 
-    if url and is_instagram_profile(url):
+    if url and is_social_profile(url):
         await save_selected_content(query, context)
         return
 
@@ -1307,6 +1343,14 @@ async def on_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def save_selected_content(query, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
+
+    if context.application.bot_data.get(f"processing_{user_id}"):
+        await query.message.reply_text(
+            "⏳ Пожалуйста, подожди. Сейчас бот уже обрабатывает предыдущий референс."
+        )
+        return
+
+    context.application.bot_data[f"processing_{user_id}"] = True
 
     content = context.user_data.get("content") or get_pending_content(user_id)
     topic = context.user_data.get("selected_topic")
@@ -1337,7 +1381,7 @@ async def save_selected_content(query, context: ContextTypes.DEFAULT_TYPE):
     sent_message = None
 
     try:
-        if is_instagram_profile(url):
+        if is_social_profile(url):
             loading_caption = (
                 f"📸 Делаю скриншот профиля...\n\n"
                 f"{topic_icon} {topic}\n"
@@ -1349,9 +1393,9 @@ async def save_selected_content(query, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 await query.edit_message_text(loading_caption)
 
-            media_path = await make_instagram_profile_screenshot(url)
+            media_path = await make_profile_screenshot(url)
 
-            caption_text = build_profile_caption(url, thought)
+            caption_text = build_profile_caption(url, thought, platform)
 
             with open(media_path, "rb") as photo_file:
                 sent_message = await context.bot.send_photo(
@@ -1379,12 +1423,12 @@ async def save_selected_content(query, context: ContextTypes.DEFAULT_TYPE):
                 "id": item_id,
                 "created_at": current_timestamp(),
                 "updated_at": current_timestamp(),
-                "type": "instagram_profile",
+                "type": "profile_reference",
                 "topic": topic,
                 "topic_id": topic_id,
                 "topic_icon": topic_icon,
                 "platform": platform,
-                "username": extract_instagram_username(url),
+                "username": extract_profile_username(url, platform),
                 "url": url,
                 "notes": thought,
                 "chat_id": CHAT_ID,
@@ -1478,8 +1522,8 @@ async def save_selected_content(query, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Ошибка обработки медиа: {type(e).__name__}: {repr(e)}")
 
         try:
-            if is_instagram_profile(url):
-                fallback_text = build_profile_caption(url, thought)
+            if is_social_profile(url):
+                fallback_text = build_profile_caption(url, thought, platform)
 
                 sent_message = await context.bot.send_message(
                     chat_id=CHAT_ID,
@@ -1491,12 +1535,12 @@ async def save_selected_content(query, context: ContextTypes.DEFAULT_TYPE):
                     "id": item_id,
                     "created_at": current_timestamp(),
                     "updated_at": current_timestamp(),
-                    "type": "instagram_profile",
+                    "type": "profile_reference",
                     "topic": topic,
                     "topic_id": topic_id,
                     "topic_icon": topic_icon,
                     "platform": platform,
-                    "username": extract_instagram_username(url),
+                    "username": extract_profile_username(url, platform),
                     "url": url,
                     "notes": thought,
                     "chat_id": CHAT_ID,
@@ -1578,6 +1622,8 @@ async def save_selected_content(query, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text(f"❌ Ошибка: {send_error}")
 
     finally:
+        context.application.bot_data.pop(f"processing_{user_id}", None)
+
         if media_path and os.path.exists(media_path):
             try:
                 os.remove(media_path)
@@ -1629,6 +1675,17 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
 # =========================
 
 async def post_init(application):
+    await application.bot.set_my_commands([
+        ("start", "Open bot panel"),
+        ("panel", "Show bottom panel"),
+        ("topics", "Manage topics"),
+        ("info", "About bot"),
+        ("export", "Export database"),
+        ("check", "Check bot status"),
+        ("testreminder", "Preview reminder"),
+        ("id", "Get chat ID"),
+    ])
+
     application.create_task(reminders_loop(application))
 
 

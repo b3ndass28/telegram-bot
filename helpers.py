@@ -207,6 +207,23 @@ def add_reminder(item_id, user_id, due_ts, label):
     return reminder
 
 
+def remove_active_reminders_for_item(item_id):
+    reminders = load_reminders()
+    changed = False
+
+    for reminder in reminders:
+        if reminder.get("item_id") == item_id and not reminder.get("sent"):
+            reminder["sent"] = True
+            reminder["cancelled"] = True
+            reminder["cancelled_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            changed = True
+
+    if changed:
+        save_reminders(reminders)
+
+    return changed
+
+
 def build_reminder_text(item):
     return (
         f"🔔 Reminder\n\n"
@@ -236,13 +253,56 @@ async def reminders_loop(application):
                     item = find_database_item(reminder.get("item_id"))
 
                     if item:
+                        user_id = reminder.get("user_id")
+
                         try:
                             await application.bot.send_message(
-                                chat_id=reminder.get("user_id"),
+                                chat_id=user_id,
                                 text=build_reminder_text(item)
                             )
+
+                            # Send the original saved media/message together with the reminder.
+                            if item.get("chat_id") and item.get("message_id"):
+                                try:
+                                    await application.bot.copy_message(
+                                        chat_id=user_id,
+                                        from_chat_id=item.get("chat_id"),
+                                        message_id=item.get("message_id")
+                                    )
+                                except Exception as copy_error:
+                                    logger.error(
+                                        f"Не удалось скопировать оригинальный пост в reminder: "
+                                        f"{type(copy_error).__name__}: {repr(copy_error)}"
+                                    )
+
                         except Exception as e:
                             logger.error(f"Не удалось отправить reminder: {type(e).__name__}: {repr(e)}")
+
+                        # Mark reminder as finished in database and try to update original post caption.
+                        updated_item = update_database_item(item.get("id"), {
+                            "reminder": "finished",
+                            "reminder_label": "✅ Reminder finished"
+                        })
+
+                        if updated_item and updated_item.get("type") == "video_reference":
+                            try:
+                                await application.bot.edit_message_caption(
+                                    chat_id=updated_item.get("chat_id"),
+                                    message_id=updated_item.get("message_id"),
+                                    caption=build_video_caption(
+                                        updated_item.get("platform", ""),
+                                        updated_item.get("url", ""),
+                                        updated_item.get("notes", ""),
+                                        updated_item.get("priority_label", ""),
+                                        updated_item.get("status_label", ""),
+                                        updated_item.get("reminder_label")
+                                    )
+                                )
+                            except Exception as edit_error:
+                                logger.error(
+                                    f"Не удалось обновить caption после reminder: "
+                                    f"{type(edit_error).__name__}: {repr(edit_error)}"
+                                )
 
                     reminder["sent"] = True
                     reminder["sent_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -354,6 +414,96 @@ def extract_instagram_username(url: str):
     return username
 
 
+def extract_tiktok_username(url: str):
+    match = re.search(r"tiktok\.com/@([^/?#]+)", url, re.I)
+    if not match:
+        return None
+    return match.group(1).strip()
+
+
+def is_tiktok_profile(url: str) -> bool:
+    url_lower = url.lower()
+
+    if "tiktok.com/@" not in url_lower:
+        return False
+
+    video_parts = [
+        "/video/",
+        "/photo/",
+        "/t/",
+        "/embed/"
+    ]
+
+    return not any(part in url_lower for part in video_parts)
+
+
+def extract_x_username(url: str):
+    match = re.search(r"(?:x\.com|twitter\.com)/([^/?#]+)", url, re.I)
+    if not match:
+        return None
+
+    username = match.group(1).strip()
+    blocked = {
+        "i", "intent", "share", "home", "search", "explore",
+        "notifications", "messages", "settings", "compose"
+    }
+
+    if username.lower() in blocked:
+        return None
+
+    return username
+
+
+def is_x_profile(url: str) -> bool:
+    url_lower = url.lower()
+
+    if "x.com/" not in url_lower and "twitter.com/" not in url_lower:
+        return False
+
+    post_parts = [
+        "/status/",
+        "/statuses/",
+        "/i/",
+        "/intent/",
+        "/share",
+        "/search",
+        "/hashtag/"
+    ]
+
+    return not any(part in url_lower for part in post_parts) and extract_x_username(url) is not None
+
+
+def extract_threads_username(url: str):
+    match = re.search(r"threads\.net/@([^/?#]+)", url, re.I)
+    if not match:
+        return None
+
+    return match.group(1).strip()
+
+
+def is_threads_profile(url: str) -> bool:
+    url_lower = url.lower()
+
+    if "threads.net/@" not in url_lower:
+        return False
+
+    post_parts = [
+        "/post/",
+        "/t/",
+    ]
+
+    return not any(part in url_lower for part in post_parts) and extract_threads_username(url) is not None
+
+
+def is_social_profile(url: str) -> bool:
+    return (
+        is_instagram_profile(url)
+        or is_tiktok_profile(url)
+        or is_x_profile(url)
+        or is_threads_profile(url)
+    )
+
+
 def detect_platform(url: str) -> str:
     url_lower = url.lower()
 
@@ -367,19 +517,31 @@ def detect_platform(url: str) -> str:
         return "Instagram Profile"
 
     if "tiktok.com" in url_lower or "vm.tiktok.com" in url_lower:
+        if is_tiktok_profile(url):
+            return "TikTok Profile"
+        if "/video/" in url_lower or "vm.tiktok.com" in url_lower:
+            return "TikTok Video"
         return "TikTok"
+
+    if "x.com" in url_lower or "twitter.com" in url_lower:
+        if is_x_profile(url):
+            return "X Profile"
+        if "/status/" in url_lower or "/statuses/" in url_lower:
+            return "X Post"
+        return "X"
+
+    if "threads.net" in url_lower:
+        if is_threads_profile(url):
+            return "Threads Profile"
+        if "/post/" in url_lower or "/t/" in url_lower:
+            return "Threads Post"
+        return "Threads"
 
     if "youtube.com/shorts" in url_lower:
         return "YouTube Shorts"
 
     if "youtube.com" in url_lower or "youtu.be" in url_lower:
         return "YouTube"
-
-    if "x.com" in url_lower or "twitter.com" in url_lower:
-        return "X / Twitter"
-
-    if "threads.net" in url_lower:
-        return "Threads"
 
     return "Video"
 
@@ -424,19 +586,39 @@ def build_video_caption(platform, url, thought, priority_label, status_label, re
     )
 
 
-def build_profile_caption(url, thought):
-    username = extract_instagram_username(url)
+def build_profile_caption(url, thought, platform="Instagram Profile"):
+    if platform == "TikTok Profile":
+        username = extract_tiktok_username(url)
+        clean_profile_url = clean_url(url)
+        title = "🎵 TikTok Profile Reference"
+    else:
+        username = extract_instagram_username(url)
+        clean_profile_url = normalize_instagram_url(url)
+        title = "📸 Instagram Profile Reference"
+
     account_line = f"@{username}" if username else "Unknown"
 
     return (
-        f"📸 Instagram Profile Reference\n\n"
+        f"{title}\n\n"
         f"👤 Account:\n"
         f"{account_line}\n\n"
         f"🔗 Profile Link:\n"
-        f"{normalize_instagram_url(url)}\n\n"
+        f"{clean_profile_url}\n\n"
         f"💭 Notes:\n"
         f"{thought}"
     )
+
+
+def extract_profile_username(url, platform):
+    if platform == "Instagram Profile":
+        return extract_instagram_username(url)
+    if platform == "TikTok Profile":
+        return extract_tiktok_username(url)
+    if platform == "X Profile":
+        return extract_x_username(url)
+    if platform == "Threads Profile":
+        return extract_threads_username(url)
+    return None
 
 
 def current_timestamp():
@@ -852,7 +1034,7 @@ async def goto_instagram_page(page, url, label):
     await page.wait_for_timeout(5000)
 
 
-async def make_instagram_profile_screenshot(url: str):
+async def make_profile_screenshot(url: str):
     screenshot_id = str(uuid.uuid4())
     screenshot_path = str(DOWNLOAD_DIR / f"{screenshot_id}.png")
 
@@ -959,6 +1141,10 @@ async def make_instagram_profile_screenshot(url: str):
                     await browser.close()
                 except Exception:
                     pass
+
+
+# Backward compatibility name
+make_instagram_profile_screenshot = make_profile_screenshot
 
 
 # =========================
