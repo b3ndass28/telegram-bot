@@ -402,13 +402,11 @@ async def click_continue_if_needed(page):
 
     logger.info("Проверяю Continue screen...")
 
-    # 1. JS по тексту
     clicked = await js_click_by_text(page, ["Continue as", "Continue"])
     if clicked:
         logger.info("Continue нажат через JS.")
         return True
 
-    # 2. Selectors
     selectors = [
         "text=Continue",
         "text=Continue as",
@@ -426,7 +424,6 @@ async def click_continue_if_needed(page):
         except Exception:
             pass
 
-    # 3. Role button
     try:
         await page.get_by_role("button", name=re.compile("Continue", re.I)).click(timeout=1500)
         logger.info("Continue нажат через role button.")
@@ -435,8 +432,6 @@ async def click_continue_if_needed(page):
     except Exception:
         pass
 
-    # 4. Координатный fallback
-    # На viewport 390x844 кнопка Continue обычно по центру, примерно y=560-620
     coordinate_clicks = [
         (195, 585),
         (195, 610),
@@ -500,12 +495,54 @@ async def close_instagram_popups(page):
     except Exception:
         pass
 
-    # Крестик справа сверху
     try:
         await page.mouse.click(358, 65)
         await page.wait_for_timeout(500)
     except Exception:
         pass
+
+
+async def wait_for_real_page_render(page):
+    """
+    Ждет, пока страница перестанет быть совсем белой/пустой.
+    """
+    try:
+        await page.wait_for_selector("body", timeout=15000)
+    except Exception:
+        pass
+
+    try:
+        await page.wait_for_function(
+            """
+            () => {
+                const bodyText = document.body ? document.body.innerText.trim() : '';
+                const imgs = document.querySelectorAll('img').length;
+                const articles = document.querySelectorAll('article').length;
+                const main = document.querySelector('main');
+
+                return bodyText.length > 50 || imgs > 2 || articles > 0 || main;
+            }
+            """,
+            timeout=20000
+        )
+        logger.info("Страница выглядит отрисованной.")
+    except Exception as e:
+        logger.warning(f"Не дождался полной отрисовки страницы: {type(e).__name__}: {repr(e)}")
+
+
+async def goto_instagram_page(page, url, label):
+    """
+    Открывает страницу и ждет нормальную отрисовку.
+    """
+    logger.info(f"Открываю страницу [{label}]: {url}")
+
+    try:
+        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+    except Exception as e:
+        logger.warning(f"goto warning [{label}]: {type(e).__name__}: {repr(e)}")
+
+    await wait_for_real_page_render(page)
+    await page.wait_for_timeout(5000)
 
 
 async def make_instagram_profile_screenshot(url: str):
@@ -544,8 +581,8 @@ async def make_instagram_profile_screenshot(url: str):
                 )
             )
 
-            context.set_default_timeout(6000)
-            context.set_default_navigation_timeout(12000)
+            context.set_default_timeout(10000)
+            context.set_default_navigation_timeout(30000)
 
             if cookies:
                 await context.add_cookies(cookies)
@@ -566,63 +603,53 @@ async def make_instagram_profile_screenshot(url: str):
             except Exception:
                 pass
 
-            # STEP 1: открыть профиль сразу
-            logger.info(f"STEP 1: Открываю профиль: {url}")
+            # STEP 1: открыть профиль
+            logger.info("STEP 1: Открываю профиль впервые.")
+            await goto_instagram_page(page, url, "profile-first")
 
-            try:
-                await page.goto(url, wait_until="commit", timeout=12000)
-            except Exception as e:
-                logger.warning(f"Первый goto profile warning: {type(e).__name__}: {repr(e)}")
-
-            await page.wait_for_timeout(4000)
-
-            # STEP 2: если появился Continue screen — нажимаем
-            logger.info("STEP 2: Проверяю Continue на первом экране.")
-
+            # STEP 2: нажать Continue, если он есть
+            logger.info("STEP 2: Проверяю Continue.")
             did_continue = await click_continue_if_needed(page)
 
-            # STEP 3: если нажали Continue — открываем профиль заново
+            # STEP 3: если Continue был — открыть профиль снова
             if did_continue:
                 logger.info("STEP 3: Continue был нажат. Открываю профиль заново.")
+                await goto_instagram_page(page, url, "profile-after-continue")
 
-                try:
-                    await page.goto(url, wait_until="commit", timeout=12000)
-                except Exception as e:
-                    logger.warning(f"Второй goto profile warning: {type(e).__name__}: {repr(e)}")
-
-                await page.wait_for_timeout(5000)
-
-            # STEP 4: закрываем popup'ы
+            # STEP 4: закрыть popup
             logger.info("STEP 4: Закрываю popup'ы.")
-
             await close_instagram_popups(page)
-            await page.wait_for_timeout(1500)
+            await page.wait_for_timeout(2000)
 
-            # STEP 5: если после popup всё еще не профиль, пробуем еще раз открыть профиль
+            # STEP 5: если нас кинуло на login/accounts — еще раз профиль
             try:
                 current_url = page.url.lower()
                 logger.info(f"URL перед финальной проверкой: {current_url}")
 
-                if "accounts" in current_url or "login" in current_url or "onetap" in current_url or "challenge" in current_url:
+                if (
+                    "accounts" in current_url
+                    or "login" in current_url
+                    or "onetap" in current_url
+                    or "challenge" in current_url
+                ):
                     logger.info("Все еще login/accounts/challenge. Финально открываю профиль.")
-
-                    try:
-                        await page.goto(url, wait_until="commit", timeout=12000)
-                    except Exception as e:
-                        logger.warning(f"Финальный goto profile warning: {type(e).__name__}: {repr(e)}")
-
-                    await page.wait_for_timeout(5000)
+                    await goto_instagram_page(page, url, "profile-final")
                     await close_instagram_popups(page)
+                    await page.wait_for_timeout(2000)
 
             except Exception as e:
                 logger.warning(f"Финальная проверка URL failed: {type(e).__name__}: {repr(e)}")
 
-            # STEP 6: маленький скролл
+            # STEP 6: подождать и чуть прокрутить
+            logger.info("STEP 6: Догружаю профиль перед скрином.")
+
+            await page.wait_for_timeout(4000)
+
             try:
                 await page.mouse.wheel(0, 250)
-                await page.wait_for_timeout(500)
+                await page.wait_for_timeout(1000)
                 await page.mouse.wheel(0, -250)
-                await page.wait_for_timeout(500)
+                await page.wait_for_timeout(1000)
             except Exception:
                 pass
 
@@ -748,10 +775,9 @@ async def on_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"🎬 {platform}"
             )
 
-            media_path = await asyncio.wait_for(
-                make_instagram_profile_screenshot(url),
-                timeout=90
-            )
+            # Без искусственного общего timeout.
+            # Пусть ждёт, пока функция сама завершится.
+            media_path = await make_instagram_profile_screenshot(url)
 
             with open(media_path, "rb") as photo_file:
                 if topic_id is not None:
