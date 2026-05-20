@@ -3,15 +3,25 @@ import json
 import os
 import re
 import uuid
+import csv
 import asyncio
 import threading
 from pathlib import Path
+from datetime import datetime
 
 import yt_dlp
 from flask import Flask
 from playwright.async_api import async_playwright
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardRemove,
+    InputFile
+)
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -61,8 +71,14 @@ CHAT_ID = -1003794802790
 
 PENDING_FILE = "pending.json"
 TOPICS_FILE = "topics.json"
+DATABASE_FILE = "database.json"
 DOWNLOAD_DIR = "downloads"
 COOKIES_FILE = "cookies.txt"
+
+ASSETS_DIR = "assets"
+TOPICS_IMAGE = os.path.join(ASSETS_DIR, "topics.jpg")
+INFO_IMAGE = os.path.join(ASSETS_DIR, "info.jpg")
+EXPORT_IMAGE = os.path.join(ASSETS_DIR, "export.jpg")
 
 Path(DOWNLOAD_DIR).mkdir(exist_ok=True)
 
@@ -75,6 +91,21 @@ DEFAULT_TOPICS = {
     "X": {"id": 8, "icon": "𝕏"},
     "Threads": {"id": 9, "icon": "🧵"},
     "Instagram": {"id": 22, "icon": "📸"}
+}
+
+
+PRIORITIES = {
+    "high": {"label": "🔥 High", "short": "High"},
+    "normal": {"label": "⭐ Normal", "short": "Normal"},
+    "later": {"label": "🧊 Later", "short": "Later"}
+}
+
+
+STATUSES = {
+    "new": "🆕 New",
+    "progress": "🟡 In Progress",
+    "done": "✅ Done",
+    "bad": "❌ Not Suitable"
 }
 
 
@@ -184,6 +215,63 @@ def topics_text():
         lines.append(f"{icon} {name} — ID: {topic_id}")
 
     return "\n".join(lines)
+
+
+# =========================
+# DATABASE HELPERS
+# =========================
+
+def load_database():
+    if os.path.exists(DATABASE_FILE):
+        try:
+            with open(DATABASE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            if isinstance(data, list):
+                return data
+
+        except Exception as e:
+            logger.error(f"Ошибка чтения database.json: {e}")
+
+    return []
+
+
+def save_database(data):
+    try:
+        with open(DATABASE_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error(f"Ошибка сохранения database.json: {e}")
+
+
+def add_database_item(item):
+    data = load_database()
+    data.append(item)
+    save_database(data)
+
+
+def update_database_status(item_id, status):
+    data = load_database()
+
+    for item in data:
+        if item.get("id") == item_id:
+            item["status"] = status
+            item["status_label"] = STATUSES.get(status, status)
+            item["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            save_database(data)
+            return item
+
+    return None
+
+
+def find_database_item(item_id):
+    data = load_database()
+
+    for item in data:
+        if item.get("id") == item_id:
+            return item
+
+    return None
 
 
 # =========================
@@ -299,18 +387,91 @@ def is_instagram_profile(url: str) -> bool:
     return not any(part in url_lower for part in not_profile_parts)
 
 
+def safe_file_exists(path):
+    return os.path.exists(path) and os.path.isfile(path)
+
+
+async def send_photo_or_text_message(message, image_path, caption, reply_markup=None):
+    if safe_file_exists(image_path):
+        with open(image_path, "rb") as photo:
+            await message.reply_photo(
+                photo=photo,
+                caption=caption,
+                reply_markup=reply_markup
+            )
+    else:
+        await message.reply_text(
+            caption,
+            reply_markup=reply_markup
+        )
+
+
+async def edit_or_send_photo(query, image_path, caption, reply_markup=None):
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
+
+    if safe_file_exists(image_path):
+        with open(image_path, "rb") as photo:
+            await query.message.chat.send_photo(
+                photo=photo,
+                caption=caption,
+                reply_markup=reply_markup
+            )
+    else:
+        await query.message.chat.send_message(
+            caption,
+            reply_markup=reply_markup
+        )
+
+
+def build_caption(platform, url, thought, priority_label, status_label):
+    return (
+        f"🎬 {platform}\n\n"
+        f"⚡ Priority: {priority_label}\n"
+        f"📌 Status: {status_label}\n\n"
+        f"🔗 Link:\n{url}\n\n"
+        f"💭 Notes:\n{thought}"
+    )
+
+
 # =========================
 # KEYBOARDS
 # =========================
 
+def build_reply_panel():
+    keyboard = [
+        [
+            KeyboardButton("📂 Topics"),
+            KeyboardButton("ℹ️ Info"),
+            KeyboardButton("📤 Export")
+        ],
+        [
+            KeyboardButton("✅ Check"),
+            KeyboardButton("❌ Hide Panel")
+        ]
+    ]
+
+    return ReplyKeyboardMarkup(
+        keyboard,
+        resize_keyboard=True,
+        one_time_keyboard=False
+    )
+
+
 def build_main_menu_keyboard():
     keyboard = [
         [
-            InlineKeyboardButton("📂 Топики", callback_data="menu_topics"),
-            InlineKeyboardButton("✅ Проверка", callback_data="menu_check")
+            InlineKeyboardButton("📂 Topics", callback_data="menu_topics"),
+            InlineKeyboardButton("ℹ️ Info", callback_data="menu_info")
         ],
         [
-            InlineKeyboardButton("❌ Закрыть", callback_data="menu_close")
+            InlineKeyboardButton("📤 Export", callback_data="menu_export"),
+            InlineKeyboardButton("✅ Check", callback_data="menu_check")
+        ],
+        [
+            InlineKeyboardButton("❌ Close", callback_data="menu_close")
         ]
     ]
 
@@ -327,6 +488,21 @@ def build_topics_menu_keyboard():
         ],
         [
             InlineKeyboardButton("🗑️ Удалить", callback_data="topics_delete")
+        ],
+        [
+            InlineKeyboardButton("⬅️ Назад", callback_data="menu_main"),
+            InlineKeyboardButton("❌ Закрыть", callback_data="menu_close")
+        ]
+    ]
+
+    return InlineKeyboardMarkup(keyboard)
+
+
+def build_export_keyboard():
+    keyboard = [
+        [
+            InlineKeyboardButton("📄 JSON", callback_data="export_json"),
+            InlineKeyboardButton("📊 CSV", callback_data="export_csv")
         ],
         [
             InlineKeyboardButton("⬅️ Назад", callback_data="menu_main"),
@@ -361,6 +537,35 @@ def build_topic_keyboard():
     keyboard.append([
         InlineKeyboardButton("❌ Отмена", callback_data="cancel")
     ])
+
+    return InlineKeyboardMarkup(keyboard)
+
+
+def build_priority_keyboard():
+    keyboard = [
+        [
+            InlineKeyboardButton("🔥 High", callback_data="priority_high"),
+            InlineKeyboardButton("⭐ Normal", callback_data="priority_normal"),
+            InlineKeyboardButton("🧊 Later", callback_data="priority_later")
+        ],
+        [
+            InlineKeyboardButton("❌ Отмена", callback_data="cancel")
+        ]
+    ]
+
+    return InlineKeyboardMarkup(keyboard)
+
+
+def build_status_keyboard(item_id):
+    keyboard = [
+        [
+            InlineKeyboardButton("🟡 В работе", callback_data=f"status_progress:{item_id}"),
+            InlineKeyboardButton("✅ Сделано", callback_data=f"status_done:{item_id}")
+        ],
+        [
+            InlineKeyboardButton("❌ Не подходит", callback_data=f"status_bad:{item_id}")
+        ]
+    ]
 
     return InlineKeyboardMarkup(keyboard)
 
@@ -895,6 +1100,58 @@ async def make_instagram_profile_screenshot(url: str):
 
 
 # =========================
+# EXPORT HELPERS
+# =========================
+
+def create_export_json():
+    data = load_database()
+    export_path = os.path.join(DOWNLOAD_DIR, "referens_database.json")
+
+    with open(export_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+    return export_path
+
+
+def create_export_csv():
+    data = load_database()
+    export_path = os.path.join(DOWNLOAD_DIR, "referens_database.csv")
+
+    fields = [
+        "id",
+        "created_at",
+        "topic",
+        "platform",
+        "url",
+        "notes",
+        "priority",
+        "status",
+        "message_id",
+        "chat_id"
+    ]
+
+    with open(export_path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fields)
+        writer.writeheader()
+
+        for item in data:
+            writer.writerow({
+                "id": item.get("id", ""),
+                "created_at": item.get("created_at", ""),
+                "topic": item.get("topic", ""),
+                "platform": item.get("platform", ""),
+                "url": item.get("url", ""),
+                "notes": item.get("notes", ""),
+                "priority": item.get("priority_label", item.get("priority", "")),
+                "status": item.get("status_label", item.get("status", "")),
+                "message_id": item.get("message_id", ""),
+                "chat_id": item.get("chat_id", "")
+            })
+
+    return export_path
+
+
+# =========================
 # MENU HANDLERS
 # =========================
 
@@ -902,8 +1159,22 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Привет 👋\n\n"
         "Отправь мне ссылку и мысли одним сообщением.\n\n"
-        "Или открой меню:",
-        reply_markup=build_main_menu_keyboard()
+        "Или открой панель:",
+        reply_markup=build_reply_panel()
+    )
+
+
+async def panel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Панель открыта ✅",
+        reply_markup=build_reply_panel()
+    )
+
+
+async def hide_panel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Панель скрыта ✅",
+        reply_markup=ReplyKeyboardRemove()
     )
 
 
@@ -915,9 +1186,46 @@ async def menu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def topics_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
+    await send_photo_or_text_message(
+        update.message,
+        TOPICS_IMAGE,
         f"{topics_text()}\n\nЧто хочешь сделать?",
         reply_markup=build_topics_menu_keyboard()
+    )
+
+
+async def info_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "ℹ️ Referens Bot\n\n"
+        "Что умеет бот:\n\n"
+        "1. Сохранять Instagram Reels / TikTok / YouTube ссылки.\n"
+        "2. Скачивать видео через yt-dlp, если это возможно.\n"
+        "3. Делать скрин Instagram-профиля через Playwright + cookies.\n"
+        "4. Сохранять notes вместе с ссылкой.\n"
+        "5. Выбирать топик через кнопки.\n"
+        "6. Ставить priority: 🔥 High / ⭐ Normal / 🧊 Later.\n"
+        "7. Менять status идеи: 🟡 In Progress / ✅ Done / ❌ Not Suitable.\n"
+        "8. Управлять топиками через меню.\n"
+        "9. Экспортировать базу в JSON или CSV.\n\n"
+        "Как пользоваться:\n\n"
+        "Отправь ссылку + заметку одним сообщением.\n"
+        "Потом выбери топик и priority."
+    )
+
+    await send_photo_or_text_message(
+        update.message,
+        INFO_IMAGE,
+        text,
+        reply_markup=build_main_menu_keyboard()
+    )
+
+
+async def export_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await send_photo_or_text_message(
+        update.message,
+        EXPORT_IMAGE,
+        "📤 Export\n\nВыбери формат экспорта базы:",
+        reply_markup=build_export_keyboard()
     )
 
 
@@ -1021,7 +1329,7 @@ async def delete_topic_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================
-# MENU CALLBACKS
+# CALLBACKS
 # =========================
 
 async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1047,27 +1355,66 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop("content", None)
         clear_pending_content(user_id)
 
-        await query.edit_message_text("✅ Закрыто.")
+        try:
+            await query.edit_message_text("✅ Закрыто.")
+        except Exception:
+            await query.message.reply_text("✅ Закрыто.")
         return
 
     if data == "menu_topics":
         context.user_data.pop("mode", None)
         context.user_data.pop("selected_topic", None)
 
-        await query.edit_message_text(
+        await edit_or_send_photo(
+            query,
+            TOPICS_IMAGE,
             f"{topics_text()}\n\nЧто хочешь сделать?",
             reply_markup=build_topics_menu_keyboard()
+        )
+        return
+
+    if data == "menu_info":
+        text = (
+            "ℹ️ Referens Bot\n\n"
+            "Что умеет бот:\n\n"
+            "1. Сохранять Instagram Reels / TikTok / YouTube ссылки.\n"
+            "2. Скачивать видео через yt-dlp, если это возможно.\n"
+            "3. Делать скрин Instagram-профиля через Playwright + cookies.\n"
+            "4. Сохранять notes вместе с ссылкой.\n"
+            "5. Выбирать топик через кнопки.\n"
+            "6. Ставить priority: 🔥 High / ⭐ Normal / 🧊 Later.\n"
+            "7. Менять status идеи.\n"
+            "8. Управлять топиками через меню.\n"
+            "9. Экспортировать базу в JSON или CSV."
+        )
+
+        await edit_or_send_photo(
+            query,
+            INFO_IMAGE,
+            text,
+            reply_markup=build_main_menu_keyboard()
+        )
+        return
+
+    if data == "menu_export":
+        await edit_or_send_photo(
+            query,
+            EXPORT_IMAGE,
+            "📤 Export\n\nВыбери формат экспорта базы:",
+            reply_markup=build_export_keyboard()
         )
         return
 
     if data == "menu_check":
         cookies_exists = os.path.exists(COOKIES_FILE)
         topics = load_topics()
+        database = load_database()
 
         await query.edit_message_text(
             f"✅ Проверка бота\n\n"
             f"Cookies file: {'✅ найден' if cookies_exists else '❌ не найден'}\n"
             f"Topics count: {len(topics)}\n"
+            f"Database items: {len(database)}\n"
             f"Docker mode: ✅ Playwright enabled",
             reply_markup=build_main_menu_keyboard()
         )
@@ -1178,6 +1525,105 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    if data == "export_json":
+        try:
+            path = create_export_json()
+
+            with open(path, "rb") as f:
+                await query.message.reply_document(
+                    document=InputFile(f, filename="referens_database.json"),
+                    caption="📄 JSON export готов."
+                )
+
+        except Exception as e:
+            await query.message.reply_text(f"❌ Ошибка экспорта JSON: {e}")
+
+        return
+
+    if data == "export_csv":
+        try:
+            path = create_export_csv()
+
+            with open(path, "rb") as f:
+                await query.message.reply_document(
+                    document=InputFile(f, filename="referens_database.csv"),
+                    caption="📊 CSV export готов."
+                )
+
+        except Exception as e:
+            await query.message.reply_text(f"❌ Ошибка экспорта CSV: {e}")
+
+        return
+
+
+async def priority_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data
+    user_id = query.from_user.id
+
+    if data == "cancel":
+        context.user_data.pop("content", None)
+        context.user_data.pop("selected_topic", None)
+        context.user_data.pop("selected_topic_icon", None)
+        clear_pending_content(user_id)
+
+        await query.edit_message_text(
+            "❌ Отменено.\n\n"
+            "Можешь отправить новую ссылку."
+        )
+        return
+
+    priority_key = data.replace("priority_", "")
+    priority = PRIORITIES.get(priority_key)
+
+    if not priority:
+        await query.edit_message_text("Ошибка: неизвестный priority.")
+        return
+
+    context.user_data["selected_priority"] = priority_key
+
+    await save_selected_content(query, context)
+
+
+async def status_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data
+    status_part, item_id = data.split(":", 1)
+    status_key = status_part.replace("status_", "")
+
+    status_label = STATUSES.get(status_key)
+
+    if not status_label:
+        await query.answer("Unknown status", show_alert=True)
+        return
+
+    item = update_database_status(item_id, status_key)
+
+    if not item:
+        await query.answer("Item not found in database", show_alert=True)
+        return
+
+    new_caption = build_caption(
+        item.get("platform", "Unknown"),
+        item.get("url", ""),
+        item.get("notes", ""),
+        item.get("priority_label", ""),
+        item.get("status_label", status_label)
+    )
+
+    try:
+        await query.edit_message_caption(
+            caption=new_caption,
+            reply_markup=build_status_keyboard(item_id)
+        )
+    except Exception as e:
+        logger.error(f"Ошибка обновления caption/status: {type(e).__name__}: {repr(e)}")
+        await query.answer("Status saved, but message caption was not updated", show_alert=True)
+
 
 # =========================
 # MESSAGE HANDLERS
@@ -1201,6 +1647,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = update.message.text.strip()
     mode = context.user_data.get("mode")
+
+    if text == "📂 Topics":
+        await topics_cmd(update, context)
+        return
+
+    if text == "ℹ️ Info":
+        await info_cmd(update, context)
+        return
+
+    if text == "📤 Export":
+        await export_cmd(update, context)
+        return
+
+    if text == "✅ Check":
+        await check_cmd(update, context)
+        return
+
+    if text == "❌ Hide Panel":
+        await hide_panel_cmd(update, context)
+        return
 
     if mode == "awaiting_new_topic":
         await handle_new_topic_text(update, context, text)
@@ -1321,10 +1787,18 @@ async def process_content(update: Update, context: ContextTypes.DEFAULT_TYPE, te
     context.user_data["content"] = text
     set_pending_content(user_id, text)
 
-    await update.message.reply_text(
-        "📌 Куда сохранить?",
-        reply_markup=build_topic_keyboard()
-    )
+    if safe_file_exists(TOPICS_IMAGE):
+        with open(TOPICS_IMAGE, "rb") as photo:
+            await update.message.reply_photo(
+                photo=photo,
+                caption="📌 Куда сохранить?",
+                reply_markup=build_topic_keyboard()
+            )
+    else:
+        await update.message.reply_text(
+            "📌 Куда сохранить?",
+            reply_markup=build_topic_keyboard()
+        )
 
 
 async def on_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1335,6 +1809,8 @@ async def on_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == "cancel":
         context.user_data.pop("content", None)
+        context.user_data.pop("selected_topic", None)
+        context.user_data.pop("selected_topic_icon", None)
         clear_pending_content(user_id)
 
         await query.edit_message_text(
@@ -1349,11 +1825,43 @@ async def on_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Ошибка: неизвестный топик.")
         return
 
+    context.user_data["selected_topic"] = topic
+    context.user_data["selected_topic_icon"] = get_topic_icon(topic)
+
+    topic_icon = get_topic_icon(topic)
+
+    try:
+        await query.edit_message_caption(
+            caption=(
+                f"{topic_icon} Topic: {topic}\n\n"
+                f"⚡ Выбери priority:"
+            ),
+            reply_markup=build_priority_keyboard()
+        )
+    except Exception:
+        await query.edit_message_text(
+            f"{topic_icon} Topic: {topic}\n\n"
+            f"⚡ Выбери priority:",
+            reply_markup=build_priority_keyboard()
+        )
+
+
+async def save_selected_content(query, context: ContextTypes.DEFAULT_TYPE):
+    user_id = query.from_user.id
+
     content = context.user_data.get("content") or get_pending_content(user_id)
+    topic = context.user_data.get("selected_topic")
+    priority_key = context.user_data.get("selected_priority", "normal")
 
     if not content:
         await query.edit_message_text(
             "Ошибка: контент не найден. Отправь ссылку заново."
+        )
+        return
+
+    if not topic:
+        await query.edit_message_text(
+            "Ошибка: топик не выбран. Отправь ссылку заново."
         )
         return
 
@@ -1366,70 +1874,115 @@ async def on_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
     platform = detect_platform(url)
     topic_id = get_topic_id(topic)
     topic_icon = get_topic_icon(topic)
+    priority_label = PRIORITIES.get(priority_key, PRIORITIES["normal"])["label"]
+    status_key = "new"
+    status_label = STATUSES[status_key]
 
-    caption_text = (
-        f"🎬 {platform}\n\n"
-        f"🔗 Link:\n{url}\n\n"
-        f"💭 Notes:\n{thought}"
+    item_id = str(uuid.uuid4())
+
+    caption_text = build_caption(
+        platform,
+        url,
+        thought,
+        priority_label,
+        status_label
     )
 
     media_path = None
+    sent_message = None
 
     try:
         if is_instagram_profile(url):
-            await query.edit_message_text(
-                f"📸 Делаю скрин профиля...\n\n"
-                f"{topic_icon} {topic}\n"
-                f"🎬 {platform}"
+            await query.edit_message_caption(
+                caption=(
+                    f"📸 Делаю скрин профиля...\n\n"
+                    f"{topic_icon} {topic}\n"
+                    f"⚡ Priority: {priority_label}\n"
+                    f"🎬 {platform}"
+                )
             )
 
             media_path = await make_instagram_profile_screenshot(url)
 
             with open(media_path, "rb") as photo_file:
-                await context.bot.send_photo(
+                sent_message = await context.bot.send_photo(
                     chat_id=CHAT_ID,
                     message_thread_id=topic_id,
                     photo=photo_file,
                     caption=caption_text,
+                    reply_markup=build_status_keyboard(item_id),
                     read_timeout=120,
                     write_timeout=120,
                     connect_timeout=120
                 )
 
-            await query.edit_message_text(
-                f"✅ Скрин профиля сохранен\n\n"
-                f"{topic_icon} {topic}\n"
-                f"🎬 {platform}"
+            await query.edit_message_caption(
+                caption=(
+                    f"✅ Скрин профиля сохранен\n\n"
+                    f"{topic_icon} {topic}\n"
+                    f"⚡ Priority: {priority_label}\n"
+                    f"🎬 {platform}"
+                )
             )
 
         else:
-            await query.edit_message_text(
-                f"⏳ Скачиваю видео...\n\n"
-                f"{topic_icon} {topic}\n"
-                f"🎬 {platform}"
+            await query.edit_message_caption(
+                caption=(
+                    f"⏳ Скачиваю видео...\n\n"
+                    f"{topic_icon} {topic}\n"
+                    f"⚡ Priority: {priority_label}\n"
+                    f"🎬 {platform}"
+                )
             )
 
             media_path = await download_video(url)
 
             with open(media_path, "rb") as video_file:
-                await context.bot.send_video(
+                sent_message = await context.bot.send_video(
                     chat_id=CHAT_ID,
                     message_thread_id=topic_id,
                     video=video_file,
                     caption=caption_text,
+                    reply_markup=build_status_keyboard(item_id),
                     supports_streaming=True,
                     read_timeout=120,
                     write_timeout=120,
                     connect_timeout=120
                 )
 
-            await query.edit_message_text(
-                f"✅ Видео сохранено\n\n"
-                f"{topic_icon} {topic}\n"
-                f"🎬 {platform}"
+            await query.edit_message_caption(
+                caption=(
+                    f"✅ Видео сохранено\n\n"
+                    f"{topic_icon} {topic}\n"
+                    f"⚡ Priority: {priority_label}\n"
+                    f"🎬 {platform}"
+                )
             )
 
+        db_item = {
+            "id": item_id,
+            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "topic": topic,
+            "topic_id": topic_id,
+            "topic_icon": topic_icon,
+            "platform": platform,
+            "url": url,
+            "notes": thought,
+            "priority": priority_key,
+            "priority_label": priority_label,
+            "status": status_key,
+            "status_label": status_label,
+            "chat_id": CHAT_ID,
+            "message_id": sent_message.message_id if sent_message else None
+        }
+
+        add_database_item(db_item)
+
         context.user_data.pop("content", None)
+        context.user_data.pop("selected_topic", None)
+        context.user_data.pop("selected_topic_icon", None)
+        context.user_data.pop("selected_priority", None)
         clear_pending_content(user_id)
 
     except Exception as e:
@@ -1437,30 +1990,68 @@ async def on_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         fallback_text = (
             f"🎬 {platform}\n\n"
+            f"⚡ Priority: {priority_label}\n"
+            f"📌 Status: {status_label}\n\n"
             f"🔗 Link:\n{url}\n\n"
             f"💭 Notes:\n{thought}\n\n"
             f"⚠️ Медиа не удалось обработать автоматически."
         )
 
         try:
-            await context.bot.send_message(
+            sent_message = await context.bot.send_message(
                 chat_id=CHAT_ID,
                 message_thread_id=topic_id,
-                text=fallback_text
+                text=fallback_text,
+                reply_markup=build_status_keyboard(item_id)
             )
 
-            await query.edit_message_text(
-                f"⚠️ Медиа не обработалось, но пост сохранен текстом.\n\n"
-                f"{topic_icon} {topic}\n"
-                f"🎬 {platform}"
-            )
+            db_item = {
+                "id": item_id,
+                "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "topic": topic,
+                "topic_id": topic_id,
+                "topic_icon": topic_icon,
+                "platform": platform,
+                "url": url,
+                "notes": thought,
+                "priority": priority_key,
+                "priority_label": priority_label,
+                "status": status_key,
+                "status_label": status_label,
+                "chat_id": CHAT_ID,
+                "message_id": sent_message.message_id if sent_message else None,
+                "media_failed": True
+            }
+
+            add_database_item(db_item)
+
+            try:
+                await query.edit_message_caption(
+                    caption=(
+                        f"⚠️ Медиа не обработалось, но пост сохранен текстом.\n\n"
+                        f"{topic_icon} {topic}\n"
+                        f"⚡ Priority: {priority_label}\n"
+                        f"🎬 {platform}"
+                    )
+                )
+            except Exception:
+                await query.edit_message_text(
+                    f"⚠️ Медиа не обработалось, но пост сохранен текстом.\n\n"
+                    f"{topic_icon} {topic}\n"
+                    f"⚡ Priority: {priority_label}\n"
+                    f"🎬 {platform}"
+                )
 
             context.user_data.pop("content", None)
+            context.user_data.pop("selected_topic", None)
+            context.user_data.pop("selected_topic_icon", None)
+            context.user_data.pop("selected_priority", None)
             clear_pending_content(user_id)
 
         except Exception as send_error:
             logger.error(f"Ошибка fallback-отправки: {type(send_error).__name__}: {repr(send_error)}")
-            await query.edit_message_text(f"❌ Ошибка: {send_error}")
+            await query.message.reply_text(f"❌ Ошибка: {send_error}")
 
     finally:
         if media_path and os.path.exists(media_path):
@@ -1488,12 +2079,15 @@ async def chat_id_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def check_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cookies_exists = os.path.exists(COOKIES_FILE)
     topics = load_topics()
+    database = load_database()
 
     await update.message.reply_text(
         f"Cookies file: {'✅ найден' if cookies_exists else '❌ не найден'}\n"
         f"Cookies path: {os.path.abspath(COOKIES_FILE)}\n"
         f"Topics file: {os.path.abspath(TOPICS_FILE)}\n"
         f"Topics count: {len(topics)}\n"
+        f"Database file: {os.path.abspath(DATABASE_FILE)}\n"
+        f"Database items: {len(database)}\n"
         f"Pending file: {os.path.abspath(PENDING_FILE)}\n"
         f"Download dir: {os.path.abspath(DOWNLOAD_DIR)}\n"
         f"Docker mode: ✅ Playwright enabled"
@@ -1519,16 +2113,22 @@ def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("panel", panel_cmd))
+    app.add_handler(CommandHandler("hidepanel", hide_panel_cmd))
     app.add_handler(CommandHandler("menu", menu_cmd))
     app.add_handler(CommandHandler("save", save_cmd))
     app.add_handler(CommandHandler("topics", topics_cmd))
+    app.add_handler(CommandHandler("info", info_cmd))
+    app.add_handler(CommandHandler("export", export_cmd))
     app.add_handler(CommandHandler("addtopic", add_topic_cmd))
     app.add_handler(CommandHandler("renametopic", rename_topic_cmd))
     app.add_handler(CommandHandler("deltopic", delete_topic_cmd))
     app.add_handler(CommandHandler("id", chat_id_cmd))
     app.add_handler(CommandHandler("check", check_cmd))
 
-    app.add_handler(CallbackQueryHandler(menu_callback, pattern="^(menu_|topics_|rename_select:|delete_select:|confirm_delete:)"))
+    app.add_handler(CallbackQueryHandler(menu_callback, pattern="^(menu_|topics_|rename_select:|delete_select:|confirm_delete:|export_)"))
+    app.add_handler(CallbackQueryHandler(priority_callback, pattern="^(priority_|cancel)"))
+    app.add_handler(CallbackQueryHandler(status_callback, pattern="^status_"))
     app.add_handler(CallbackQueryHandler(on_topic, pattern="^(t_|cancel)"))
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
