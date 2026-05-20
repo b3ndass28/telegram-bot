@@ -9,6 +9,7 @@ from pathlib import Path
 
 import yt_dlp
 from flask import Flask
+from playwright.async_api import async_playwright
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -56,11 +57,19 @@ logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
+# Твой Telegram supergroup/forum chat ID
 CHAT_ID = -1003794802790
 
-TOPICS = ["CowGirl", "Student", "Meme", "Telegram", "X", "Threads"]
+TOPICS = [
+    "CowGirl",
+    "Student",
+    "Meme",
+    "Telegram",
+    "X",
+    "Threads",
+    "Instagram"
+]
 
-COUNTER_FILE = "counter.json"
 PENDING_FILE = "pending.json"
 DOWNLOAD_DIR = "downloads"
 COOKIES_FILE = "cookies.txt"
@@ -71,33 +80,6 @@ Path(DOWNLOAD_DIR).mkdir(exist_ok=True)
 # =========================
 # FILE HELPERS
 # =========================
-
-def load_counter():
-    if os.path.exists(COUNTER_FILE):
-        try:
-            with open(COUNTER_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-
-            for topic in TOPICS:
-                if topic not in data:
-                    data[topic] = 0
-
-            return data
-
-        except Exception as e:
-            logger.error(f"Ошибка чтения counter.json: {e}")
-            return {topic: 0 for topic in TOPICS}
-
-    return {topic: 0 for topic in TOPICS}
-
-
-def save_counter(counter):
-    try:
-        with open(COUNTER_FILE, "w", encoding="utf-8") as f:
-            json.dump(counter, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        logger.error(f"Ошибка сохранения counter.json: {e}")
-
 
 def load_pending():
     if os.path.exists(PENDING_FILE):
@@ -147,7 +129,10 @@ def get_topic_id(name):
         "Meme": 7,
         "Telegram": 4,
         "X": 8,
-        "Threads": 9
+        "Threads": 9,
+
+        # Новый топик Instagram
+        "Instagram": 22
     }
 
     return mapping.get(name)
@@ -170,6 +155,56 @@ def extract_url_and_thought(text: str):
         thought = "Без текста"
 
     return url, thought
+
+
+def detect_platform(url: str) -> str:
+    url_lower = url.lower()
+
+    if "instagram.com" in url_lower:
+        if "/reel/" in url_lower or "/reels/" in url_lower:
+            return "Instagram Reel"
+        if "/p/" in url_lower:
+            return "Instagram Post"
+        if "/stories/" in url_lower:
+            return "Instagram Story"
+        return "Instagram Profile"
+
+    if "tiktok.com" in url_lower or "vm.tiktok.com" in url_lower:
+        return "TikTok"
+
+    if "youtube.com/shorts" in url_lower:
+        return "YouTube Shorts"
+
+    if "youtube.com" in url_lower or "youtu.be" in url_lower:
+        return "YouTube"
+
+    if "x.com" in url_lower or "twitter.com" in url_lower:
+        return "X / Twitter"
+
+    if "threads.net" in url_lower:
+        return "Threads"
+
+    return "Video"
+
+
+def is_instagram_profile(url: str) -> bool:
+    url_lower = url.lower()
+
+    if "instagram.com" not in url_lower:
+        return False
+
+    not_profile_parts = [
+        "/reel/",
+        "/reels/",
+        "/p/",
+        "/stories/",
+        "/tv/",
+        "/explore/",
+        "/accounts/",
+        "/direct/"
+    ]
+
+    return not any(part in url_lower for part in not_profile_parts)
 
 
 def build_topic_keyboard():
@@ -240,16 +275,73 @@ async def download_video(url: str):
 
 
 # =========================
+# SCREENSHOT
+# =========================
+
+async def make_mobile_screenshot(url: str):
+    screenshot_id = str(uuid.uuid4())
+    screenshot_path = os.path.join(DOWNLOAD_DIR, f"{screenshot_id}.png")
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(
+            headless=True,
+            args=[
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu"
+            ]
+        )
+
+        context = await browser.new_context(
+            viewport={"width": 390, "height": 844},
+            device_scale_factor=2,
+            is_mobile=True,
+            has_touch=True,
+            user_agent=(
+                "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+                "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+                "Version/17.0 Mobile/15E148 Safari/604.1"
+            )
+        )
+
+        page = await context.new_page()
+
+        await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        await page.wait_for_timeout(5000)
+
+        try:
+            await page.locator("text=Allow all cookies").click(timeout=3000)
+            await page.wait_for_timeout(1500)
+        except Exception:
+            pass
+
+        try:
+            await page.locator("text=Not now").click(timeout=3000)
+            await page.wait_for_timeout(1500)
+        except Exception:
+            pass
+
+        await page.screenshot(
+            path=screenshot_path,
+            full_page=False
+        )
+
+        await browser.close()
+
+    return screenshot_path
+
+
+# =========================
 # BOT HANDLERS
 # =========================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Привет 👋\n\n"
-        "Просто отправь мне ссылку и мысли одним сообщением.\n\n"
-        "Пример:\n"
+        "Отправь мне ссылку и мысли одним сообщением.\n\n"
+        "Примеры:\n"
         "https://www.instagram.com/reel/... идея для поста\n\n"
-        "После этого выбери топик, и я сохраню пост."
+        "https://www.instagram.com/username/ реф аккаунт по вайбу"
     )
 
 
@@ -274,12 +366,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def process_content(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
+    # ВАЖНО:
+    # Если пользователь отправил текст без ссылки — бот ничего не отвечает.
     if not has_link(text):
-        await update.message.reply_text(
-            "Отправь ссылку и мысли одним сообщением.\n\n"
-            "Пример:\n"
-            "https://www.instagram.com/reel/... идея для поста"
-        )
         return
 
     user_id = update.effective_user.id
@@ -329,70 +418,103 @@ async def on_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Ошибка: ссылка не найдена.")
         return
 
-    counter = load_counter()
-    counter[topic] += 1
-    post_number = counter[topic]
-    save_counter(counter)
+    platform = detect_platform(url)
+    topic_id = get_topic_id(topic)
 
     caption_text = (
-        f"📌 Post #{post_number}\n\n"
+        f"🎬 {platform}\n\n"
         f"🔗 Link:\n{url}\n\n"
         f"💭 Notes:\n{thought}"
     )
 
-    topic_id = get_topic_id(topic)
-
-    await query.edit_message_text(
-        f"⏳ Скачиваю видео...\n\n"
-        f"Топик: {topic}\n"
-        f"Post #{post_number}"
-    )
-
-    video_path = None
+    media_path = None
 
     try:
-        video_path = await download_video(url)
+        if is_instagram_profile(url):
+            await query.edit_message_text(
+                f"📸 Делаю скрин профиля...\n\n"
+                f"📂 {topic}\n"
+                f"🎬 {platform}"
+            )
 
-        with open(video_path, "rb") as video_file:
-            if topic_id is not None:
-                await context.bot.send_video(
-                    chat_id=CHAT_ID,
-                    message_thread_id=topic_id,
-                    video=video_file,
-                    caption=caption_text,
-                    supports_streaming=True,
-                    read_timeout=120,
-                    write_timeout=120,
-                    connect_timeout=120
-                )
-            else:
-                await context.bot.send_video(
-                    chat_id=CHAT_ID,
-                    video=video_file,
-                    caption=caption_text,
-                    supports_streaming=True,
-                    read_timeout=120,
-                    write_timeout=120,
-                    connect_timeout=120
-                )
+            media_path = await make_mobile_screenshot(url)
 
-        await query.edit_message_text(
-            f"✅ Видео сохранено\n\n"
-            f"📌 Post #{post_number}\n"
-            f"📂 {topic}"
-        )
+            with open(media_path, "rb") as photo_file:
+                if topic_id is not None:
+                    await context.bot.send_photo(
+                        chat_id=CHAT_ID,
+                        message_thread_id=topic_id,
+                        photo=photo_file,
+                        caption=caption_text,
+                        read_timeout=120,
+                        write_timeout=120,
+                        connect_timeout=120
+                    )
+                else:
+                    await context.bot.send_photo(
+                        chat_id=CHAT_ID,
+                        photo=photo_file,
+                        caption=caption_text,
+                        read_timeout=120,
+                        write_timeout=120,
+                        connect_timeout=120
+                    )
+
+            await query.edit_message_text(
+                f"✅ Скрин профиля сохранен\n\n"
+                f"📂 {topic}\n"
+                f"🎬 {platform}"
+            )
+
+        else:
+            await query.edit_message_text(
+                f"⏳ Скачиваю видео...\n\n"
+                f"📂 {topic}\n"
+                f"🎬 {platform}"
+            )
+
+            media_path = await download_video(url)
+
+            with open(media_path, "rb") as video_file:
+                if topic_id is not None:
+                    await context.bot.send_video(
+                        chat_id=CHAT_ID,
+                        message_thread_id=topic_id,
+                        video=video_file,
+                        caption=caption_text,
+                        supports_streaming=True,
+                        read_timeout=120,
+                        write_timeout=120,
+                        connect_timeout=120
+                    )
+                else:
+                    await context.bot.send_video(
+                        chat_id=CHAT_ID,
+                        video=video_file,
+                        caption=caption_text,
+                        supports_streaming=True,
+                        read_timeout=120,
+                        write_timeout=120,
+                        connect_timeout=120
+                    )
+
+            await query.edit_message_text(
+                f"✅ Видео сохранено\n\n"
+                f"📂 {topic}\n"
+                f"🎬 {platform}"
+            )
 
         context.user_data.pop("content", None)
         clear_pending_content(user_id)
 
     except Exception as e:
-        logger.error(f"Ошибка скачивания/отправки видео: {e}")
+        logger.error(f"Ошибка обработки медиа: {e}")
 
         fallback_text = (
-            f"📌 Post #{post_number}\n\n"
+            f"🎬 {platform}\n\n"
             f"🔗 Link:\n{url}\n\n"
             f"💭 Notes:\n{thought}\n\n"
-            f"⚠️ Видео не удалось скачать автоматически."
+            f"⚠️ Медиа не удалось обработать автоматически."
         )
 
         try:
@@ -409,9 +531,9 @@ async def on_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
 
             await query.edit_message_text(
-                f"⚠️ Видео не скачалось, но пост сохранен текстом.\n\n"
-                f"📌 Post #{post_number}\n"
-                f"📂 {topic}"
+                f"⚠️ Медиа не обработалось, но пост сохранен текстом.\n\n"
+                f"📂 {topic}\n"
+                f"🎬 {platform}"
             )
 
             context.user_data.pop("content", None)
@@ -422,9 +544,9 @@ async def on_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(f"❌ Ошибка: {send_error}")
 
     finally:
-        if video_path and os.path.exists(video_path):
+        if media_path and os.path.exists(media_path):
             try:
-                os.remove(video_path)
+                os.remove(media_path)
             except Exception:
                 pass
 
@@ -440,6 +562,17 @@ async def chat_id_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def check_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    cookies_exists = os.path.exists(COOKIES_FILE)
+
+    await update.message.reply_text(
+        f"Cookies file: {'✅ найден' if cookies_exists else '❌ не найден'}\n"
+        f"Cookies path: {os.path.abspath(COOKIES_FILE)}\n"
+        f"Pending file: {os.path.abspath(PENDING_FILE)}\n"
+        f"Download dir: {os.path.abspath(DOWNLOAD_DIR)}"
+    )
+
+
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"Update {update} caused error: {context.error}")
 
@@ -450,7 +583,9 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     if not BOT_TOKEN:
-        raise ValueError("BOT_TOKEN не найден. Добавь BOT_TOKEN в Environment Variables на Render.")
+        raise ValueError(
+            "BOT_TOKEN не найден. Добавь BOT_TOKEN в Environment Variables на Render."
+        )
 
     threading.Thread(target=run_web_server, daemon=True).start()
 
@@ -459,6 +594,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("save", save_cmd))
     app.add_handler(CommandHandler("id", chat_id_cmd))
+    app.add_handler(CommandHandler("check", check_cmd))
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
