@@ -59,21 +59,136 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 CHAT_ID = -1003794802790
 
-TOPICS = [
-    "CowGirl",
-    "Student",
-    "Meme",
-    "Telegram",
-    "X",
-    "Threads",
-    "Instagram"
-]
-
 PENDING_FILE = "pending.json"
+TOPICS_FILE = "topics.json"
 DOWNLOAD_DIR = "downloads"
 COOKIES_FILE = "cookies.txt"
 
 Path(DOWNLOAD_DIR).mkdir(exist_ok=True)
+
+
+DEFAULT_TOPICS = {
+    "CowGirl": {
+        "id": 2,
+        "icon": "🤠"
+    },
+    "Student": {
+        "id": 6,
+        "icon": "🎓"
+    },
+    "Meme": {
+        "id": 7,
+        "icon": "😂"
+    },
+    "Telegram": {
+        "id": 4,
+        "icon": "✈️"
+    },
+    "X": {
+        "id": 8,
+        "icon": "𝕏"
+    },
+    "Threads": {
+        "id": 9,
+        "icon": "🧵"
+    },
+    "Instagram": {
+        "id": 22,
+        "icon": "📸"
+    }
+}
+
+
+# =========================
+# TOPIC HELPERS
+# =========================
+
+def load_topics():
+    if os.path.exists(TOPICS_FILE):
+        try:
+            with open(TOPICS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            fixed = {}
+
+            for name, value in data.items():
+                if isinstance(value, dict):
+                    fixed[name] = {
+                        "id": int(value.get("id")),
+                        "icon": value.get("icon", "📂")
+                    }
+                else:
+                    fixed[name] = {
+                        "id": int(value),
+                        "icon": "📂"
+                    }
+
+            return fixed
+
+        except Exception as e:
+            logger.error(f"Ошибка чтения topics.json: {e}")
+
+    save_topics(DEFAULT_TOPICS)
+    return DEFAULT_TOPICS.copy()
+
+
+def save_topics(topics):
+    try:
+        with open(TOPICS_FILE, "w", encoding="utf-8") as f:
+            json.dump(topics, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error(f"Ошибка сохранения topics.json: {e}")
+
+
+def get_topic_names():
+    return list(load_topics().keys())
+
+
+def get_topic_id(name):
+    topics = load_topics()
+    item = topics.get(name)
+
+    if not item:
+        return None
+
+    return item.get("id")
+
+
+def get_topic_icon(name):
+    topics = load_topics()
+    item = topics.get(name)
+
+    if not item:
+        return "📂"
+
+    return item.get("icon", "📂")
+
+
+def guess_topic_icon(name):
+    lower = name.lower()
+
+    if "inst" in lower:
+        return "📸"
+    if "cow" in lower:
+        return "🤠"
+    if "student" in lower:
+        return "🎓"
+    if "meme" in lower:
+        return "😂"
+    if "telegram" in lower:
+        return "✈️"
+    if lower == "x" or "twitter" in lower:
+        return "𝕏"
+    if "thread" in lower:
+        return "🧵"
+    if "car" in lower:
+        return "🏎️"
+    if "idea" in lower:
+        return "💡"
+    if "ref" in lower:
+        return "📌"
+
+    return "📂"
 
 
 # =========================
@@ -119,19 +234,6 @@ def clear_pending_content(user_id):
 # =========================
 # TELEGRAM HELPERS
 # =========================
-
-def get_topic_id(name):
-    mapping = {
-        "CowGirl": 2,
-        "Student": 6,
-        "Meme": 7,
-        "Telegram": 4,
-        "X": 8,
-        "Threads": 9,
-        "Instagram": 22
-    }
-    return mapping.get(name)
-
 
 def has_link(text: str) -> bool:
     return "http://" in text or "https://" in text
@@ -203,16 +305,20 @@ def is_instagram_profile(url: str) -> bool:
 
 
 def build_topic_keyboard():
+    topics = load_topics()
     buttons_per_row = 3
     keyboard = []
 
-    for i in range(0, len(TOPICS), buttons_per_row):
+    topic_names = list(topics.keys())
+
+    for i in range(0, len(topic_names), buttons_per_row):
         row = []
 
-        for topic in TOPICS[i:i + buttons_per_row]:
+        for topic in topic_names[i:i + buttons_per_row]:
+            icon = topics[topic].get("icon", "📂")
             row.append(
                 InlineKeyboardButton(
-                    topic,
+                    f"{icon} {topic}",
                     callback_data=f"t_{topic}"
                 )
             )
@@ -340,9 +446,6 @@ async def download_video(url: str):
 # =========================
 
 async def js_click_by_text(page, words):
-    """
-    Ищет видимый элемент по тексту и кликает через JS.
-    """
     try:
         result = await page.evaluate(
             """
@@ -395,18 +498,78 @@ async def js_click_by_text(page, words):
 
 
 async def click_continue_if_needed(page):
-    """
-    Жестко нажимает Continue / Continue as.
-    Использует JS, selectors, role и координаты.
-    """
-
     logger.info("Проверяю Continue screen...")
 
-    clicked = await js_click_by_text(page, ["Continue as", "Continue"])
-    if clicked:
-        logger.info("Continue нажат через JS.")
-        return True
+    async def continue_still_visible():
+        try:
+            text = await page.locator("body").inner_text(timeout=3000)
+            text_lower = text.lower()
+            return "continue" in text_lower
+        except Exception:
+            return False
 
+    async def wait_continue_disappear():
+        for _ in range(8):
+            if not await continue_still_visible():
+                logger.info("Continue screen исчез.")
+                return True
+            await page.wait_for_timeout(1000)
+
+        logger.warning("Continue screen всё еще виден после клика.")
+        return False
+
+    # 1. JS click
+    try:
+        clicked = await page.evaluate(
+            """
+            () => {
+                const candidates = Array.from(document.querySelectorAll(
+                    'button, div[role="button"], a, span, div'
+                ));
+
+                function isVisible(el) {
+                    const rect = el.getBoundingClientRect();
+                    const style = window.getComputedStyle(el);
+                    return rect.width > 0 &&
+                           rect.height > 0 &&
+                           style.visibility !== 'hidden' &&
+                           style.display !== 'none';
+                }
+
+                for (const el of candidates) {
+                    const text = (el.innerText || el.textContent || '').trim().toLowerCase();
+
+                    if (!text) continue;
+                    if (!isVisible(el)) continue;
+
+                    if (text.includes('continue')) {
+                        const clickable = el.closest('button, div[role="button"], a') || el;
+
+                        clickable.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+                        clickable.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+                        clickable.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+                        clickable.click();
+
+                        return { clicked: true, text };
+                    }
+                }
+
+                return { clicked: false };
+            }
+            """
+        )
+
+        if clicked and clicked.get("clicked"):
+            logger.info(f"JS Continue click: {clicked}")
+            await page.wait_for_timeout(3000)
+
+            if await wait_continue_disappear():
+                return True
+
+    except Exception as e:
+        logger.warning(f"JS Continue click failed: {type(e).__name__}: {repr(e)}")
+
+    # 2. Selectors
     selectors = [
         "text=Continue",
         "text=Continue as",
@@ -417,46 +580,43 @@ async def click_continue_if_needed(page):
 
     for selector in selectors:
         try:
-            await page.locator(selector).first.click(timeout=1500)
+            await page.locator(selector).first.click(timeout=2500, force=True)
             logger.info(f"Continue нажат через selector: {selector}")
-            await page.wait_for_timeout(2500)
-            return True
+            await page.wait_for_timeout(3000)
+
+            if await wait_continue_disappear():
+                return True
+
         except Exception:
             pass
 
-    try:
-        await page.get_by_role("button", name=re.compile("Continue", re.I)).click(timeout=1500)
-        logger.info("Continue нажат через role button.")
-        await page.wait_for_timeout(2500)
-        return True
-    except Exception:
-        pass
-
+    # 3. Coordinates
     coordinate_clicks = [
-        (195, 585),
-        (195, 610),
-        (195, 560),
+        (195, 515),
         (195, 535),
+        (195, 555),
+        (195, 575),
+        (195, 595),
+        (195, 615),
     ]
 
     for x, y in coordinate_clicks:
         try:
             await page.mouse.click(x, y)
-            logger.info(f"Continue fallback click по координатам: {x}, {y}")
-            await page.wait_for_timeout(2500)
-            return True
+            logger.info(f"Continue fallback click: {x}, {y}")
+            await page.wait_for_timeout(3000)
+
+            if await wait_continue_disappear():
+                return True
+
         except Exception:
             pass
 
-    logger.info("Continue не найден.")
+    logger.warning("Continue не удалось нажать.")
     return False
 
 
 async def close_instagram_popups(page):
-    """
-    Быстро закрывает обычные Instagram popup'ы.
-    """
-
     logger.info("Закрываю Instagram popup'ы...")
 
     popup_words = [
@@ -503,9 +663,6 @@ async def close_instagram_popups(page):
 
 
 async def wait_for_real_page_render(page):
-    """
-    Ждет, пока страница перестанет быть совсем белой/пустой.
-    """
     try:
         await page.wait_for_selector("body", timeout=15000)
     except Exception:
@@ -531,9 +688,6 @@ async def wait_for_real_page_render(page):
 
 
 async def goto_instagram_page(page, url, label):
-    """
-    Открывает страницу и ждет нормальную отрисовку.
-    """
     logger.info(f"Открываю страницу [{label}]: {url}")
 
     try:
@@ -603,25 +757,20 @@ async def make_instagram_profile_screenshot(url: str):
             except Exception:
                 pass
 
-            # STEP 1: открыть профиль
             logger.info("STEP 1: Открываю профиль впервые.")
             await goto_instagram_page(page, url, "profile-first")
 
-            # STEP 2: нажать Continue, если он есть
             logger.info("STEP 2: Проверяю Continue.")
             did_continue = await click_continue_if_needed(page)
 
-            # STEP 3: если Continue был — открыть профиль снова
             if did_continue:
                 logger.info("STEP 3: Continue был нажат. Открываю профиль заново.")
                 await goto_instagram_page(page, url, "profile-after-continue")
 
-            # STEP 4: закрыть popup
             logger.info("STEP 4: Закрываю popup'ы.")
             await close_instagram_popups(page)
             await page.wait_for_timeout(2000)
 
-            # STEP 5: если нас кинуло на login/accounts — еще раз профиль
             try:
                 current_url = page.url.lower()
                 logger.info(f"URL перед финальной проверкой: {current_url}")
@@ -640,7 +789,6 @@ async def make_instagram_profile_screenshot(url: str):
             except Exception as e:
                 logger.warning(f"Финальная проверка URL failed: {type(e).__name__}: {repr(e)}")
 
-            # STEP 6: подождать и чуть прокрутить
             logger.info("STEP 6: Догружаю профиль перед скрином.")
 
             await page.wait_for_timeout(4000)
@@ -653,7 +801,6 @@ async def make_instagram_profile_screenshot(url: str):
             except Exception:
                 pass
 
-            # STEP 7: скрин
             logger.info("STEP 7: Делаю screenshot.")
 
             await page.screenshot(
@@ -672,7 +819,7 @@ async def make_instagram_profile_screenshot(url: str):
 
 
 # =========================
-# BOT HANDLERS
+# BOT COMMANDS
 # =========================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -681,7 +828,136 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Отправь мне ссылку и мысли одним сообщением.\n\n"
         "Примеры:\n"
         "https://www.instagram.com/reel/... идея для поста\n\n"
-        "https://www.instagram.com/username/ реф аккаунт по вайбу"
+        "https://www.instagram.com/username/ реф аккаунт по вайбу\n\n"
+        "Команды:\n"
+        "/topics — список топиков\n"
+        "/addtopic Name ID — добавить топик\n"
+        "/renametopic OldName NewName — переименовать топик\n"
+        "/deltopic Name — удалить топик\n"
+        "/id — узнать ID чата/топика"
+    )
+
+
+async def topics_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    topics = load_topics()
+
+    if not topics:
+        await update.message.reply_text("Топиков пока нет.")
+        return
+
+    lines = ["📂 Текущие топики:\n"]
+
+    for name, data in topics.items():
+        icon = data.get("icon", "📂")
+        topic_id = data.get("id")
+        lines.append(f"{icon} {name} — ID: {topic_id}")
+
+    lines.append("\nДобавить:")
+    lines.append("/addtopic Cars 25")
+    lines.append("\nПереименовать:")
+    lines.append("/renametopic Cars Auto")
+    lines.append("\nУдалить:")
+    lines.append("/deltopic Cars")
+
+    await update.message.reply_text("\n".join(lines))
+
+
+async def add_topic_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "Используй так:\n\n"
+            "/addtopic Название ID\n\n"
+            "Пример:\n"
+            "/addtopic Cars 25"
+        )
+        return
+
+    name = context.args[0].strip()
+    topic_id_raw = context.args[1].strip()
+
+    try:
+        topic_id = int(topic_id_raw)
+    except ValueError:
+        await update.message.reply_text("ID топика должен быть числом.")
+        return
+
+    topics = load_topics()
+
+    if name in topics:
+        await update.message.reply_text(f"Топик {name} уже существует.")
+        return
+
+    topics[name] = {
+        "id": topic_id,
+        "icon": guess_topic_icon(name)
+    }
+
+    save_topics(topics)
+
+    await update.message.reply_text(
+        f"✅ Топик добавлен:\n\n"
+        f"{topics[name]['icon']} {name} — ID: {topic_id}"
+    )
+
+
+async def rename_topic_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "Используй так:\n\n"
+            "/renametopic СтароеНазвание НовоеНазвание\n\n"
+            "Пример:\n"
+            "/renametopic CowGirl Cowgirl"
+        )
+        return
+
+    old_name = context.args[0].strip()
+    new_name = context.args[1].strip()
+
+    topics = load_topics()
+
+    if old_name not in topics:
+        await update.message.reply_text(f"Топик {old_name} не найден.")
+        return
+
+    if new_name in topics:
+        await update.message.reply_text(f"Топик {new_name} уже существует.")
+        return
+
+    topics[new_name] = topics.pop(old_name)
+    topics[new_name]["icon"] = guess_topic_icon(new_name)
+
+    save_topics(topics)
+
+    await update.message.reply_text(
+        f"✅ Топик переименован:\n\n"
+        f"{old_name} → {topics[new_name]['icon']} {new_name}"
+    )
+
+
+async def delete_topic_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if len(context.args) < 1:
+        await update.message.reply_text(
+            "Используй так:\n\n"
+            "/deltopic Название\n\n"
+            "Пример:\n"
+            "/deltopic Cars"
+        )
+        return
+
+    name = context.args[0].strip()
+
+    topics = load_topics()
+
+    if name not in topics:
+        await update.message.reply_text(f"Топик {name} не найден.")
+        return
+
+    removed = topics.pop(name)
+    save_topics(topics)
+
+    await update.message.reply_text(
+        f"🗑️ Топик удалён:\n\n"
+        f"{name} — ID: {removed.get('id')}"
     )
 
 
@@ -715,7 +991,7 @@ async def process_content(update: Update, context: ContextTypes.DEFAULT_TYPE, te
     set_pending_content(user_id, text)
 
     await update.message.reply_text(
-        "Куда сохранить этот пост?",
+        "📌 Куда сохранить?",
         reply_markup=build_topic_keyboard()
     )
 
@@ -738,7 +1014,7 @@ async def on_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     topic = query.data.replace("t_", "")
 
-    if topic not in TOPICS:
+    if topic not in get_topic_names():
         await query.edit_message_text("Ошибка: неизвестный топик.")
         return
 
@@ -758,6 +1034,7 @@ async def on_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     platform = detect_platform(url)
     topic_id = get_topic_id(topic)
+    topic_icon = get_topic_icon(topic)
 
     caption_text = (
         f"🎬 {platform}\n\n"
@@ -771,76 +1048,53 @@ async def on_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if is_instagram_profile(url):
             await query.edit_message_text(
                 f"📸 Делаю скрин профиля...\n\n"
-                f"📂 {topic}\n"
+                f"{topic_icon} {topic}\n"
                 f"🎬 {platform}"
             )
 
-            # Без искусственного общего timeout.
-            # Пусть ждёт, пока функция сама завершится.
             media_path = await make_instagram_profile_screenshot(url)
 
             with open(media_path, "rb") as photo_file:
-                if topic_id is not None:
-                    await context.bot.send_photo(
-                        chat_id=CHAT_ID,
-                        message_thread_id=topic_id,
-                        photo=photo_file,
-                        caption=caption_text,
-                        read_timeout=120,
-                        write_timeout=120,
-                        connect_timeout=120
-                    )
-                else:
-                    await context.bot.send_photo(
-                        chat_id=CHAT_ID,
-                        photo=photo_file,
-                        caption=caption_text,
-                        read_timeout=120,
-                        write_timeout=120,
-                        connect_timeout=120
-                    )
+                await context.bot.send_photo(
+                    chat_id=CHAT_ID,
+                    message_thread_id=topic_id,
+                    photo=photo_file,
+                    caption=caption_text,
+                    read_timeout=120,
+                    write_timeout=120,
+                    connect_timeout=120
+                )
 
             await query.edit_message_text(
                 f"✅ Скрин профиля сохранен\n\n"
-                f"📂 {topic}\n"
+                f"{topic_icon} {topic}\n"
                 f"🎬 {platform}"
             )
 
         else:
             await query.edit_message_text(
                 f"⏳ Скачиваю видео...\n\n"
-                f"📂 {topic}\n"
+                f"{topic_icon} {topic}\n"
                 f"🎬 {platform}"
             )
 
             media_path = await download_video(url)
 
             with open(media_path, "rb") as video_file:
-                if topic_id is not None:
-                    await context.bot.send_video(
-                        chat_id=CHAT_ID,
-                        message_thread_id=topic_id,
-                        video=video_file,
-                        caption=caption_text,
-                        supports_streaming=True,
-                        read_timeout=120,
-                        write_timeout=120,
-                        connect_timeout=120
-                    )
-                else:
-                    await context.bot.send_video(
-                        chat_id=CHAT_ID,
-                        video=video_file,
-                        caption=caption_text,
-                        supports_streaming=True,
-                        read_timeout=120,
-                        write_timeout=120,
-                        connect_timeout=120
-                    )
+                await context.bot.send_video(
+                    chat_id=CHAT_ID,
+                    message_thread_id=topic_id,
+                    video=video_file,
+                    caption=caption_text,
+                    supports_streaming=True,
+                    read_timeout=120,
+                    write_timeout=120,
+                    connect_timeout=120
+                )
 
             await query.edit_message_text(
                 f"✅ Видео сохранено\n\n"
-                f"📂 {topic}\n"
+                f"{topic_icon} {topic}\n"
                 f"🎬 {platform}"
             )
 
@@ -858,21 +1112,15 @@ async def on_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         try:
-            if topic_id is not None:
-                await context.bot.send_message(
-                    chat_id=CHAT_ID,
-                    message_thread_id=topic_id,
-                    text=fallback_text
-                )
-            else:
-                await context.bot.send_message(
-                    chat_id=CHAT_ID,
-                    text=fallback_text
-                )
+            await context.bot.send_message(
+                chat_id=CHAT_ID,
+                message_thread_id=topic_id,
+                text=fallback_text
+            )
 
             await query.edit_message_text(
                 f"⚠️ Медиа не обработалось, но пост сохранен текстом.\n\n"
-                f"📂 {topic}\n"
+                f"{topic_icon} {topic}\n"
                 f"🎬 {platform}"
             )
 
@@ -904,10 +1152,13 @@ async def chat_id_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def check_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cookies_exists = os.path.exists(COOKIES_FILE)
+    topics = load_topics()
 
     await update.message.reply_text(
         f"Cookies file: {'✅ найден' if cookies_exists else '❌ не найден'}\n"
         f"Cookies path: {os.path.abspath(COOKIES_FILE)}\n"
+        f"Topics file: {os.path.abspath(TOPICS_FILE)}\n"
+        f"Topics count: {len(topics)}\n"
         f"Pending file: {os.path.abspath(PENDING_FILE)}\n"
         f"Download dir: {os.path.abspath(DOWNLOAD_DIR)}\n"
         f"Docker mode: ✅ Playwright enabled"
@@ -934,6 +1185,10 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("save", save_cmd))
+    app.add_handler(CommandHandler("topics", topics_cmd))
+    app.add_handler(CommandHandler("addtopic", add_topic_cmd))
+    app.add_handler(CommandHandler("renametopic", rename_topic_cmd))
+    app.add_handler(CommandHandler("deltopic", delete_topic_cmd))
     app.add_handler(CommandHandler("id", chat_id_cmd))
     app.add_handler(CommandHandler("check", check_cmd))
 
