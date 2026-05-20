@@ -116,7 +116,7 @@ async def topic_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         # Получаем ID топика для выбранной темы
-        topic_id = await get_topic_id(selected_topic)
+        topic_id = get_topic_id(selected_topic)
         
         if topic_id:
             # Отправляем сообщение в топик
@@ -140,7 +140,7 @@ async def topic_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Ошибка при отправке: {e}")
         await query.edit_message_text(f"❌ Ошибка при сохранении: {str(e)}")
 
-async def get_topic_id(topic_name: str) -> int:
+def get_topic_id(topic_name: str) -> int:
     """
     Получает ID топика по названию
     """
