@@ -1273,6 +1273,10 @@ async def ask_topic_prompt_for_content(context: ContextTypes.DEFAULT_TYPE, chat_
 
     url, _ = extract_url_and_thought(text)
 
+    if url and ("threads.com" in url.lower() or "threads.net" in url.lower()):
+        from helpers import normalize_threads_url
+        url = normalize_threads_url(url)
+
     if url and is_social_profile(url):
         platform = detect_platform(url)
         caption = f"📸 {platform}\n\n📌 Куда сохранить профиль?"
@@ -1342,6 +1346,10 @@ async def on_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
     content = context.user_data.get("content") or get_pending_content(user_id)
     url, _ = extract_url_and_thought(content or "")
 
+    if url and ("threads.com" in url.lower() or "threads.net" in url.lower()):
+        from helpers import normalize_threads_url
+        url = normalize_threads_url(url)
+
     if url and is_social_profile(url):
         await save_selected_content(query, context)
         return
@@ -1393,7 +1401,13 @@ async def save_selected_content(query, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("Ошибка: ссылка не найдена.")
         return
 
-    url = normalize_instagram_url(url) if "instagram.com" in url.lower() else clean_url(url)
+    if "instagram.com" in url.lower():
+        url = normalize_instagram_url(url)
+    elif "threads.com" in url.lower() or "threads.net" in url.lower():
+        from helpers import normalize_threads_url
+        url = normalize_threads_url(url)
+    else:
+        url = clean_url(url)
 
     platform = detect_platform(url)
     topic_id = get_topic_id(topic)

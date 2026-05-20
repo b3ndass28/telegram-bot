@@ -388,6 +388,26 @@ def normalize_instagram_url(url: str) -> str:
     return url
 
 
+def normalize_threads_url(url: str) -> str:
+    """
+    Threads often shares links as threads.com/.../media.
+    yt-dlp expects threads.net and the post URL, not the /media suffix.
+    """
+    url = clean_url(url).split("?")[0].split("#")[0]
+    url = url.replace("https://www.threads.com/", "https://www.threads.net/")
+    url = url.replace("http://www.threads.com/", "https://www.threads.net/")
+    url = url.replace("https://threads.com/", "https://www.threads.net/")
+    url = url.replace("http://threads.com/", "https://www.threads.net/")
+
+    if url.endswith("/media"):
+        url = url[:-6]
+
+    if "/media/" in url:
+        url = url.split("/media/")[0]
+
+    return url
+
+
 def extract_instagram_username(url: str):
     url = normalize_instagram_url(url)
     match = re.search(r"instagram\.com/([^/?#]+)/?", url, re.I)
@@ -474,6 +494,7 @@ def is_x_profile(url: str) -> bool:
 
 
 def extract_threads_username(url: str):
+    url = normalize_threads_url(url)
     match = re.search(r"threads\.net/@([^/?#]+)", url, re.I)
     if not match:
         return None
@@ -530,10 +551,13 @@ def detect_platform(url: str) -> str:
             return "X Post"
         return "X"
 
-    if "threads.net" in url_lower:
-        if is_threads_profile(url):
+    if "threads.net" in url_lower or "threads.com" in url_lower:
+        normalized_threads = normalize_threads_url(url)
+        normalized_lower = normalized_threads.lower()
+
+        if is_threads_profile(normalized_threads):
             return "Threads Profile"
-        if "/post/" in url_lower or "/t/" in url_lower:
+        if "/post/" in normalized_lower or "/t/" in normalized_lower:
             return "Threads Post"
         return "Threads"
 
