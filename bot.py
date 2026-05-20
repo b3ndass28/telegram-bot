@@ -1,3 +1,4 @@
+
 import logging
 import json
 import os
@@ -510,6 +511,31 @@ async def edit_or_send_photo(query, image_path, caption, reply_markup=None):
             caption,
             reply_markup=reply_markup
         )
+
+
+async def safe_edit_message(query, text, reply_markup=None):
+    """
+    Безопасно редактирует и обычные текстовые сообщения, и photo+caption.
+    """
+    try:
+        if query.message and query.message.photo:
+            await query.edit_message_caption(
+                caption=text,
+                reply_markup=reply_markup
+            )
+        else:
+            await query.edit_message_text(
+                text=text,
+                reply_markup=reply_markup
+            )
+    except Exception:
+        try:
+            await query.message.reply_text(
+                text,
+                reply_markup=reply_markup
+            )
+        except Exception as e:
+            logger.error(f"safe_edit_message failed: {type(e).__name__}: {repr(e)}")
 
 
 async def update_post_message(query, item):
@@ -1298,50 +1324,48 @@ def create_export_csv():
 
 
 # =========================
-# MENU / COMMANDS
+# INFO TEXTS
 # =========================
 
-INFO_TEXT = (
+INFO_SHORT_TEXT = (
     "ℹ️ Referens Bot\n\n"
-    "Referens Bot — это личная система для сохранения контент-референсов.\n\n"
-    "Главная идея бота: ты отправляешь ссылку на видео, пост или Instagram-аккаунт, "
-    "добавляешь свои мысли, а бот сохраняет всё в удобном виде — уже с медиа, "
-    "заметками, приоритетом, статусом и возможностью поставить напоминание.\n\n"
-    "Что делает бот:\n\n"
-    "🎬 Сохраняет видео-референсы\n"
-    "Отправь ссылку на Instagram Reel, TikTok, YouTube или другой поддерживаемый источник — "
-    "бот попробует скачать видео и отправить его в нужный топик.\n\n"
-    "💭 Сохраняет твои заметки\n"
-    "Вместе с видео бот сохраняет твои мысли: что понравилось, как можно адаптировать идею, "
-    "какой хук, стиль, поза, монтаж или сценарий стоит повторить.\n\n"
-    "📸 Делает скрин Instagram-аккаунтов\n"
-    "Если отправить ссылку на Instagram-профиль, бот делает скрин аккаунта в мобильном стиле "
-    "и сохраняет его как референс вместе с твоими заметками.\n\n"
-    "📂 Раскладывает всё по топикам\n"
-    "Ты выбираешь, куда сохранить идею. Топики можно создавать, переименовывать и удалять прямо через бота.\n\n"
-    "⚡ Добавляет приоритет\n"
-    "🔥 High — важная идея, которую стоит использовать быстрее\n"
+    "Главная функция бота — сохранять контент-референсы уже вместе с медиа, "
+    "твоими заметками, приоритетом, статусом и напоминаниями.\n\n"
+    "Отправь ссылку + свою мысль → выбери топик → выбери приоритет → бот сохранит референс в нужный раздел."
+)
+
+INFO_LONG_TEXT = (
+    "Что умеет бот:\n\n"
+    "🎬 Сохранять видео-референсы\n"
+    "Бот может скачать поддерживаемое видео из Instagram, TikTok, YouTube и других источников "
+    "и отправить его в выбранный топик.\n\n"
+    "💭 Сохранять твои заметки\n"
+    "Вместе с видео сохраняются твои мысли: что понравилось, как адаптировать идею, какой хук, стиль, монтаж или сценарий повторить.\n\n"
+    "📸 Делать скрин Instagram-аккаунтов\n"
+    "Если отправить ссылку на Instagram-профиль, бот делает мобильный скрин аккаунта и сохраняет его как референс.\n\n"
+    "📂 Раскладывать всё по топикам\n"
+    "Топики можно создавать, переименовывать и удалять прямо через бота.\n\n"
+    "⚡ Приоритет\n"
+    "🔥 High — использовать быстрее\n"
     "⭐ Normal — обычная хорошая идея\n"
     "🧊 Later — идея на потом\n\n"
-    "📌 Позволяет менять статус\n"
+    "📌 Статус\n"
     "🆕 New — новая идея\n"
     "🟡 In Progress — в работе\n"
     "✅ Done — сделано\n"
     "❌ Not Suitable — не подходит\n\n"
-    "🔔 Ставит напоминания\n"
-    "Можно поставить напоминание, чтобы бот позже вернул тебя к идее: завтра, через 3 дня или через 7 дней.\n\n"
-    "📤 Экспортирует базу\n"
-    "Все сохранённые идеи можно выгрузить в JSON или CSV.\n\n"
-    "Как пользоваться:\n\n"
-    "1. Отправь ссылку и свои мысли одним сообщением.\n"
-    "2. Выбери топик.\n"
-    "3. Выбери приоритет.\n"
-    "4. Бот сохранит референс в нужный раздел.\n"
-    "5. Позже можно изменить статус, приоритет или поставить напоминание.\n\n"
+    "🔔 Напоминания\n"
+    "Можно поставить reminder на завтра, через 3 дня или через 7 дней.\n\n"
+    "📤 Export\n"
+    "Базу идей можно выгрузить в JSON или CSV.\n\n"
     "Пример:\n"
-    "https://www.instagram.com/reel/... хороший хук в начале, можно адаптировать под cowgirl-видео"
+    "https://www.instagram.com/reel/... хороший хук, можно адаптировать под cowgirl-видео"
 )
 
+
+# =========================
+# MENU / COMMANDS
+# =========================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -1383,12 +1407,19 @@ async def topics_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def info_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await send_photo_or_text_message(
-        update.message,
-        INFO_IMAGE,
-        INFO_TEXT,
-        reply_markup=build_main_menu_keyboard()
-    )
+    if safe_file_exists(INFO_IMAGE):
+        with open(INFO_IMAGE, "rb") as photo:
+            await update.message.reply_photo(
+                photo=photo,
+                caption=INFO_SHORT_TEXT,
+                reply_markup=build_main_menu_keyboard()
+            )
+        await update.message.reply_text(INFO_LONG_TEXT)
+    else:
+        await update.message.reply_text(
+            f"{INFO_SHORT_TEXT}\n\n{INFO_LONG_TEXT}",
+            reply_markup=build_main_menu_keyboard()
+        )
 
 
 async def export_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1550,7 +1581,8 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop("mode", None)
         context.user_data.pop("selected_topic", None)
 
-        await query.edit_message_text(
+        await safe_edit_message(
+            query,
             "⚙️ Главное меню\n\nЧто хочешь сделать?",
             reply_markup=build_main_menu_keyboard()
         )
@@ -1562,10 +1594,7 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop("content", None)
         clear_pending_content(user_id)
 
-        try:
-            await query.edit_message_text("✅ Закрыто.")
-        except Exception:
-            await query.message.reply_text("✅ Закрыто.")
+        await safe_edit_message(query, "✅ Закрыто.")
         return
 
     if data == "menu_topics":
@@ -1581,12 +1610,24 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "menu_info":
-        await edit_or_send_photo(
-            query,
-            INFO_IMAGE,
-            INFO_TEXT,
-            reply_markup=build_main_menu_keyboard()
-        )
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+
+        if safe_file_exists(INFO_IMAGE):
+            with open(INFO_IMAGE, "rb") as photo:
+                await query.message.chat.send_photo(
+                    photo=photo,
+                    caption=INFO_SHORT_TEXT,
+                    reply_markup=build_main_menu_keyboard()
+                )
+            await query.message.chat.send_message(INFO_LONG_TEXT)
+        else:
+            await query.message.chat.send_message(
+                f"{INFO_SHORT_TEXT}\n\n{INFO_LONG_TEXT}",
+                reply_markup=build_main_menu_keyboard()
+            )
         return
 
     if data == "menu_export":
@@ -1604,7 +1645,8 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         database = load_database()
         reminders = load_reminders()
 
-        await query.edit_message_text(
+        await safe_edit_message(
+            query,
             f"✅ Проверка бота\n\n"
             f"Cookies file: {'✅ найден' if cookies_exists else '❌ не найден'}\n"
             f"Topics count: {len(topics)}\n"
@@ -1618,13 +1660,18 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "topics_create":
         context.user_data["mode"] = "awaiting_new_topic"
 
-        await query.edit_message_text(
+        text = (
             "➕ Создание нового топика\n\n"
             "Отправь название нового топика одним сообщением.\n\n"
             "Пример:\n"
             "Cars\n\n"
             "Бот сам создаст Telegram-топик в группе и добавит его в список.\n\n"
-            "Важно: у бота должны быть права Manage Topics.",
+            "Важно: у бота должны быть права Manage Topics."
+        )
+
+        await safe_edit_message(
+            query,
+            text,
             reply_markup=build_back_cancel_keyboard()
         )
         return
@@ -1632,7 +1679,8 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "topics_rename":
         context.user_data["mode"] = "select_rename_topic"
 
-        await query.edit_message_text(
+        await safe_edit_message(
+            query,
             "✏️ Выбери топик, который хочешь переименовать:",
             reply_markup=build_topic_select_keyboard("rename_select")
         )
@@ -1641,7 +1689,8 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "topics_delete":
         context.user_data["mode"] = "select_delete_topic"
 
-        await query.edit_message_text(
+        await safe_edit_message(
+            query,
             "🗑️ Выбери топик, который хочешь удалить:",
             reply_markup=build_topic_select_keyboard("delete_select")
         )
@@ -1652,7 +1701,8 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         topics = load_topics()
 
         if topic_name not in topics:
-            await query.edit_message_text(
+            await safe_edit_message(
+                query,
                 "Топик не найден.",
                 reply_markup=build_topics_menu_keyboard()
             )
@@ -1664,7 +1714,8 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         icon = topics[topic_name].get("icon", "📂")
         topic_id = topics[topic_name].get("id")
 
-        await query.edit_message_text(
+        await safe_edit_message(
+            query,
             f"✏️ Переименование топика\n\n"
             f"Текущий топик:\n"
             f"{icon} {topic_name} — ID: {topic_id}\n\n"
@@ -1679,7 +1730,8 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         topics = load_topics()
 
         if topic_name not in topics:
-            await query.edit_message_text(
+            await safe_edit_message(
+                query,
                 "Топик не найден.",
                 reply_markup=build_topics_menu_keyboard()
             )
@@ -1688,7 +1740,8 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         icon = topics[topic_name].get("icon", "📂")
         topic_id = topics[topic_name].get("id")
 
-        await query.edit_message_text(
+        await safe_edit_message(
+            query,
             f"⚠️ Точно удалить топик?\n\n"
             f"{icon} {topic_name} — ID: {topic_id}\n\n"
             f"Это удалит Telegram-топик из группы и уберёт его из бота.\n\n"
@@ -1702,7 +1755,8 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         topics = load_topics()
 
         if topic_name not in topics:
-            await query.edit_message_text(
+            await safe_edit_message(
+                query,
                 "Топик уже не найден.",
                 reply_markup=build_topics_menu_keyboard()
             )
@@ -1716,7 +1770,8 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 message_thread_id=topic_id
             )
         except Exception as e:
-            await query.edit_message_text(
+            await safe_edit_message(
+                query,
                 f"❌ Не удалось удалить Telegram-топик.\n\n"
                 f"Проверь права бота на управление темами.\n\n"
                 f"Ошибка: {e}",
@@ -1727,7 +1782,8 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         removed = topics.pop(topic_name)
         save_topics(topics)
 
-        await query.edit_message_text(
+        await safe_edit_message(
+            query,
             f"🗑️ Топик удалён:\n\n"
             f"{topic_name} — ID: {removed.get('id')}\n\n"
             f"{topics_text()}",
