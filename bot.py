@@ -244,7 +244,16 @@ def load_netscape_cookies_for_playwright(cookie_file: str):
         for line in lines:
             line = line.strip()
 
-            if not line or line.startswith("#"):
+            if not line or line.startswith("# Netscape"):
+                continue
+
+            http_only = False
+
+            if line.startswith("#HttpOnly_"):
+                http_only = True
+                line = line.replace("#HttpOnly_", "", 1)
+
+            if line.startswith("#"):
                 continue
 
             parts = line.split("\t")
@@ -259,13 +268,16 @@ def load_netscape_cookies_for_playwright(cookie_file: str):
             except Exception:
                 expires = -1
 
+            if expires == 0:
+                expires = -1
+
             cookie = {
                 "name": name,
                 "value": value,
                 "domain": domain,
                 "path": path,
                 "expires": expires,
-                "httpOnly": False,
+                "httpOnly": http_only,
                 "secure": secure.upper() == "TRUE",
                 "sameSite": "Lax"
             }
@@ -276,7 +288,7 @@ def load_netscape_cookies_for_playwright(cookie_file: str):
         return cookies
 
     except Exception as e:
-        logger.error(f"Ошибка чтения cookies.txt для Playwright: {e}")
+        logger.error(f"Ошибка чтения cookies.txt для Playwright: {type(e).__name__}: {repr(e)}")
         return []
 
 
@@ -324,84 +336,164 @@ async def download_video(url: str):
 
 
 # =========================
-# SCREENSHOT WITH PLAYWRIGHT
+# INSTAGRAM SCREENSHOT HELPERS
 # =========================
+
+async def click_text_js(page, keywords):
+    """
+    JS fallback: ищет любой видимый элемент с нужным текстом и кликает.
+    Работает лучше, чем обычные selectors, когда Instagram делает странную кнопку.
+    """
+    try:
+        result = await page.evaluate(
+            """
+            (keywords) => {
+                const words = keywords.map(x => x.toLowerCase());
+
+                function isVisible(el) {
+                    const rect = el.getBoundingClientRect();
+                    const style = window.getComputedStyle(el);
+                    return rect.width > 0 &&
+                           rect.height > 0 &&
+                           style.visibility !== 'hidden' &&
+                           style.display !== 'none';
+                }
+
+                const candidates = Array.from(document.querySelectorAll(
+                    'button, div[role="button"], a, span, div'
+                ));
+
+                for (const el of candidates) {
+                    const text = (el.innerText || el.textContent || '').trim().toLowerCase();
+
+                    if (!text) continue;
+                    if (!isVisible(el)) continue;
+
+                    for (const word of words) {
+                        if (text.includes(word)) {
+                            const clickable = el.closest('button, div[role="button"], a') || el;
+                            clickable.click();
+                            return { clicked: true, text: text };
+                        }
+                    }
+                }
+
+                return { clicked: false, text: null };
+            }
+            """,
+            keywords
+        )
+
+        if result and result.get("clicked"):
+            logger.info(f"JS click сработал по тексту: {result.get('text')}")
+            await page.wait_for_timeout(2500)
+            return True
+
+    except Exception as e:
+        logger.warning(f"JS click не сработал: {type(e).__name__}: {repr(e)}")
+
+    return False
+
+
+async def click_continue_if_needed(page):
+    """
+    Нажимает Continue / Continue as, если Instagram показывает экран выбора аккаунта.
+    """
+
+    logger.info("Проверяю кнопку Continue...")
+
+    # 1. Самый надежный fallback через JS
+    clicked = await click_text_js(page, ["Continue as", "Continue"])
+    if clicked:
+        logger.info("Continue нажат через JS.")
+        return True
+
+    # 2. Playwright text selectors
+    selectors = [
+        "text=Continue as",
+        "text=Continue",
+        "button:has-text('Continue')",
+        "div[role='button']:has-text('Continue')",
+        "a:has-text('Continue')"
+    ]
+
+    for selector in selectors:
+        try:
+            locator = page.locator(selector).first
+            await locator.click(timeout=2000)
+            logger.info(f"Continue нажат через selector: {selector}")
+            await page.wait_for_timeout(3000)
+            return True
+        except Exception:
+            pass
+
+    # 3. Role button
+    try:
+        await page.get_by_role("button", name=re.compile("Continue", re.I)).click(timeout=2000)
+        logger.info("Continue нажат через role button.")
+        await page.wait_for_timeout(3000)
+        return True
+    except Exception:
+        pass
+
+    logger.info("Continue не найден.")
+    return False
+
 
 async def close_instagram_popups(page):
     """
-    Пытается закрыть Instagram popup окна:
-    Save your login info, Not now, cookies, крестик и другие модалки.
+    Закрывает Instagram popup окна.
     """
 
-    # 1. Пробуем закрыть по тексту кнопок
-    popup_texts = [
-        "Not now",
-        "Not Now",
-        "Not now.",
-        "Maybe later",
-        "Allow all cookies",
-        "Accept all",
-        "Accept",
-        "Save info",
-        "Save your login info?"
+    logger.info("Пробую закрыть popup'ы Instagram...")
+
+    # Сначала Continue
+    await click_continue_if_needed(page)
+
+    # Потом все остальные окна
+    await click_text_js(
+        page,
+        [
+            "Not now",
+            "Not Now",
+            "Maybe later",
+            "Allow all cookies",
+            "Accept all",
+            "Accept",
+            "Save info",
+            "Save your login info"
+        ]
+    )
+
+    selectors = [
+        "text=Not now",
+        "text=Not Now",
+        "text=Maybe later",
+        "text=Allow all cookies",
+        "text=Accept all",
+        "text=Accept"
     ]
 
-    for text in popup_texts:
+    for selector in selectors:
         try:
-            await page.get_by_text(text, exact=False).click(timeout=2500)
-            await page.wait_for_timeout(1500)
+            await page.locator(selector).first.click(timeout=1000)
+            logger.info(f"Popup закрыт через selector: {selector}")
+            await page.wait_for_timeout(700)
         except Exception:
             pass
 
-    # 2. Отдельно пробуем locator по тексту Not now
-    try:
-        await page.locator("text=Not now").click(timeout=3000)
-        await page.wait_for_timeout(2000)
-    except Exception:
-        pass
-
-    try:
-        await page.locator("text=Not Now").click(timeout=3000)
-        await page.wait_for_timeout(2000)
-    except Exception:
-        pass
-
-    # 3. Пробуем role button
-    try:
-        await page.get_by_role("button", name=re.compile("Not now", re.I)).click(timeout=3000)
-        await page.wait_for_timeout(2000)
-    except Exception:
-        pass
-
-    try:
-        await page.get_by_role("button", name=re.compile("Not Now", re.I)).click(timeout=3000)
-        await page.wait_for_timeout(2000)
-    except Exception:
-        pass
-
-    # 4. Пробуем Escape
     try:
         await page.keyboard.press("Escape")
-        await page.wait_for_timeout(1500)
+        await page.wait_for_timeout(500)
     except Exception:
         pass
 
-    # 5. Пробуем кликнуть по крестику справа сверху.
-    # Viewport 390x844 с device_scale_factor=2.
-    # Координаты клика в CSS px, поэтому крестик примерно справа сверху: x=358, y=65.
-    possible_close_points = [
-        (358, 65),
-        (360, 70),
-        (350, 60),
-        (365, 58)
-    ]
-
-    for x, y in possible_close_points:
-        try:
-            await page.mouse.click(x, y)
-            await page.wait_for_timeout(1500)
-        except Exception:
-            pass
+    # Клик по возможному крестику справа сверху
+    try:
+        await page.mouse.click(358, 65)
+        await page.wait_for_timeout(500)
+    except Exception:
+        pass
 
 
 async def make_instagram_profile_screenshot(url: str):
@@ -409,64 +501,145 @@ async def make_instagram_profile_screenshot(url: str):
     screenshot_path = os.path.join(DOWNLOAD_DIR, f"{screenshot_id}.png")
 
     cookies = load_netscape_cookies_for_playwright(COOKIES_FILE)
+    browser = None
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-gpu"
-            ]
-        )
-
-        context = await browser.new_context(
-            viewport={"width": 390, "height": 844},
-            device_scale_factor=2,
-            is_mobile=True,
-            has_touch=True,
-            user_agent=(
-                "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
-                "AppleWebKit/605.1.15 (KHTML, like Gecko) "
-                "Version/17.0 Mobile/15E148 Safari/604.1"
-            )
-        )
-
-        if cookies:
-            await context.add_cookies(cookies)
-            logger.info("Cookies добавлены в Playwright context.")
-        else:
-            logger.warning("Cookies не добавлены в Playwright context.")
-
-        page = await context.new_page()
-
-        await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-        await page.wait_for_timeout(7000)
-
-        # Закрываем popup'ы несколько раз, потому что Instagram иногда показывает их не сразу
-        await close_instagram_popups(page)
-        await page.wait_for_timeout(2000)
-        await close_instagram_popups(page)
-
-        # Небольшая прокрутка вниз-вверх, чтобы профиль догрузился
         try:
-            await page.mouse.wheel(0, 300)
+            browser = await p.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--disable-blink-features=AutomationControlled"
+                ]
+            )
+
+            context = await browser.new_context(
+                viewport={"width": 390, "height": 844},
+                device_scale_factor=2,
+                is_mobile=True,
+                has_touch=True,
+                locale="en-US",
+                timezone_id="America/New_York",
+                user_agent=(
+                    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+                    "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+                    "Version/17.0 Mobile/15E148 Safari/604.1"
+                )
+            )
+
+            context.set_default_timeout(8000)
+            context.set_default_navigation_timeout(18000)
+
+            if cookies:
+                await context.add_cookies(cookies)
+                logger.info("Cookies добавлены в Playwright context.")
+            else:
+                logger.warning("Cookies не добавлены в Playwright context.")
+
+            page = await context.new_page()
+
+            # Anti webdriver marker
+            try:
+                await page.add_init_script(
+                    """
+                    Object.defineProperty(navigator, 'webdriver', {
+                        get: () => undefined
+                    });
+                    """
+                )
+            except Exception:
+                pass
+
+            # STEP 1: Open Instagram home first
+            logger.info("STEP 1: Открываю Instagram home.")
+            try:
+                await page.goto("https://www.instagram.com/", wait_until="commit", timeout=18000)
+                await page.wait_for_timeout(3500)
+            except Exception as e:
+                logger.warning(f"Home открылся не полностью: {type(e).__name__}: {repr(e)}")
+
+            # STEP 2: Click Continue if visible
+            logger.info("STEP 2: Пытаюсь нажать Continue на home.")
+            did_continue_home = await click_continue_if_needed(page)
+            await page.wait_for_timeout(2500)
+
+            # STEP 3: Close popups on home
+            logger.info("STEP 3: Закрываю popup'ы на home.")
+            await close_instagram_popups(page)
             await page.wait_for_timeout(1500)
-            await page.mouse.wheel(0, -300)
+
+            # STEP 4: Open target profile
+            logger.info(f"STEP 4: Открываю профиль: {url}")
+            try:
+                await page.goto(url, wait_until="commit", timeout=18000)
+                await page.wait_for_timeout(5000)
+            except Exception as e:
+                logger.warning(f"Профиль открылся не полностью: {type(e).__name__}: {repr(e)}")
+
+            # STEP 5: If Continue appears again, click it
+            logger.info("STEP 5: Проверяю Continue на профиле.")
+            did_continue_profile = await click_continue_if_needed(page)
+            await page.wait_for_timeout(2500)
+
+            # STEP 6: If Continue was clicked, open profile again
+            if did_continue_home or did_continue_profile:
+                logger.info("STEP 6: Continue был нажат. Повторно открываю профиль.")
+                try:
+                    await page.goto(url, wait_until="commit", timeout=18000)
+                    await page.wait_for_timeout(5000)
+                except Exception as e:
+                    logger.warning(f"Повторный профиль открылся не полностью: {type(e).__name__}: {repr(e)}")
+
+            # STEP 7: Close final popups
+            logger.info("STEP 7: Финально закрываю popup'ы.")
+            await close_instagram_popups(page)
             await page.wait_for_timeout(1500)
-        except Exception:
-            pass
 
-        await page.wait_for_timeout(3000)
+            # STEP 8: If still on login/accounts page, one more attempt
+            try:
+                current_url = page.url.lower()
+                logger.info(f"Текущий URL перед скрином: {current_url}")
 
-        await page.screenshot(
-            path=screenshot_path,
-            full_page=False
-        )
+                if (
+                    "accounts" in current_url
+                    or "login" in current_url
+                    or "onetap" in current_url
+                    or "challenge" in current_url
+                ):
+                    logger.info("Все еще login/accounts. Еще раз открываю профиль.")
+                    await page.goto(url, wait_until="commit", timeout=18000)
+                    await page.wait_for_timeout(5000)
+                    await close_instagram_popups(page)
+                    await page.wait_for_timeout(1500)
+            except Exception as e:
+                logger.warning(f"Финальная проверка URL не удалась: {type(e).__name__}: {repr(e)}")
 
-        await browser.close()
+            # STEP 9: Small scroll to load profile
+            try:
+                await page.mouse.wheel(0, 250)
+                await page.wait_for_timeout(700)
+                await page.mouse.wheel(0, -250)
+                await page.wait_for_timeout(700)
+            except Exception:
+                pass
 
-    return screenshot_path
+            # STEP 10: Screenshot
+            logger.info("STEP 10: Делаю screenshot.")
+            await page.screenshot(
+                path=screenshot_path,
+                full_page=False
+            )
+
+            return screenshot_path
+
+        finally:
+            if browser:
+                try:
+                    await browser.close()
+                except Exception:
+                    pass
 
 
 # =========================
@@ -504,7 +677,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def process_content(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
-    # Если пользователь отправил текст без ссылки — бот молчит
     if not has_link(text):
         return
 
@@ -574,7 +746,10 @@ async def on_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"🎬 {platform}"
             )
 
-            media_path = await make_instagram_profile_screenshot(url)
+            media_path = await asyncio.wait_for(
+                make_instagram_profile_screenshot(url),
+                timeout=75
+            )
 
             with open(media_path, "rb") as photo_file:
                 if topic_id is not None:
@@ -645,7 +820,7 @@ async def on_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
         clear_pending_content(user_id)
 
     except Exception as e:
-        logger.error(f"Ошибка обработки медиа: {e}")
+        logger.error(f"Ошибка обработки медиа: {type(e).__name__}: {repr(e)}")
 
         fallback_text = (
             f"🎬 {platform}\n\n"
@@ -677,7 +852,7 @@ async def on_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
             clear_pending_content(user_id)
 
         except Exception as send_error:
-            logger.error(f"Ошибка fallback-отправки: {send_error}")
+            logger.error(f"Ошибка fallback-отправки: {type(send_error).__name__}: {repr(send_error)}")
             await query.edit_message_text(f"❌ Ошибка: {send_error}")
 
     finally:
@@ -712,7 +887,7 @@ async def check_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    logger.error(f"Update {update} caused error: {context.error}")
+    logger.error(f"Update {update} caused error: {type(context.error).__name__}: {repr(context.error)}")
 
 
 # =========================
