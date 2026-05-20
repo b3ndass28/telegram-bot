@@ -236,85 +236,86 @@ def build_reminder_text(item):
     )
 
 
-async def reminders_loop(application):
-    await asyncio.sleep(10)
+async def reminders_job(context):
+    """
+    One reminder check. Scheduled by Telegram JobQueue.
+    This replaces the old infinite reminders_loop task, which could be destroyed while pending.
+    """
+    try:
+        now = time.time()
+        reminders = load_reminders()
+        changed = False
 
-    while True:
-        try:
-            now = time.time()
-            reminders = load_reminders()
-            changed = False
+        for reminder in reminders:
+            if reminder.get("sent"):
+                continue
 
-            for reminder in reminders:
-                if reminder.get("sent"):
-                    continue
+            if reminder.get("due_ts", 0) <= now:
+                item = find_database_item(reminder.get("item_id"))
 
-                if reminder.get("due_ts", 0) <= now:
-                    item = find_database_item(reminder.get("item_id"))
+                if item:
+                    user_id = reminder.get("user_id")
 
-                    if item:
-                        user_id = reminder.get("user_id")
+                    try:
+                        await context.bot.send_message(
+                            chat_id=user_id,
+                            text=build_reminder_text(item)
+                        )
 
+                        if item.get("chat_id") and item.get("message_id"):
+                            try:
+                                await context.bot.copy_message(
+                                    chat_id=user_id,
+                                    from_chat_id=item.get("chat_id"),
+                                    message_id=item.get("message_id")
+                                )
+                            except Exception as copy_error:
+                                logger.error(
+                                    f"Не удалось скопировать оригинальный пост в reminder: "
+                                    f"{type(copy_error).__name__}: {repr(copy_error)}"
+                                )
+
+                    except Exception as e:
+                        logger.error(f"Не удалось отправить reminder: {type(e).__name__}: {repr(e)}")
+
+                    updated_item = update_database_item(item.get("id"), {
+                        "reminder": "finished",
+                        "reminder_label": "✅ Reminder finished"
+                    })
+
+                    if updated_item and updated_item.get("type") in {
+                        "video_reference",
+                        "post_screenshot_reference",
+                        "threads_link_reference"
+                    }:
                         try:
-                            await application.bot.send_message(
-                                chat_id=user_id,
-                                text=build_reminder_text(item)
+                            await context.bot.edit_message_caption(
+                                chat_id=updated_item.get("chat_id"),
+                                message_id=updated_item.get("message_id"),
+                                caption=build_video_caption(
+                                    updated_item.get("platform", ""),
+                                    updated_item.get("url", ""),
+                                    updated_item.get("notes", ""),
+                                    updated_item.get("priority_label", ""),
+                                    updated_item.get("status_label", ""),
+                                    updated_item.get("reminder_label")
+                                )
+                            )
+                        except Exception as edit_error:
+                            logger.error(
+                                f"Не удалось обновить caption после reminder: "
+                                f"{type(edit_error).__name__}: {repr(edit_error)}"
                             )
 
-                            # Send the original saved media/message together with the reminder.
-                            if item.get("chat_id") and item.get("message_id"):
-                                try:
-                                    await application.bot.copy_message(
-                                        chat_id=user_id,
-                                        from_chat_id=item.get("chat_id"),
-                                        message_id=item.get("message_id")
-                                    )
-                                except Exception as copy_error:
-                                    logger.error(
-                                        f"Не удалось скопировать оригинальный пост в reminder: "
-                                        f"{type(copy_error).__name__}: {repr(copy_error)}"
-                                    )
+                reminder["sent"] = True
+                reminder["sent_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                changed = True
 
-                        except Exception as e:
-                            logger.error(f"Не удалось отправить reminder: {type(e).__name__}: {repr(e)}")
+        if changed:
+            save_reminders(reminders)
 
-                        # Mark reminder as finished in database and try to update original post caption.
-                        updated_item = update_database_item(item.get("id"), {
-                            "reminder": "finished",
-                            "reminder_label": "✅ Reminder finished"
-                        })
-
-                        if updated_item and updated_item.get("type") == "video_reference":
-                            try:
-                                await application.bot.edit_message_caption(
-                                    chat_id=updated_item.get("chat_id"),
-                                    message_id=updated_item.get("message_id"),
-                                    caption=build_video_caption(
-                                        updated_item.get("platform", ""),
-                                        updated_item.get("url", ""),
-                                        updated_item.get("notes", ""),
-                                        updated_item.get("priority_label", ""),
-                                        updated_item.get("status_label", ""),
-                                        updated_item.get("reminder_label")
-                                    )
-                                )
-                            except Exception as edit_error:
-                                logger.error(
-                                    f"Не удалось обновить caption после reminder: "
-                                    f"{type(edit_error).__name__}: {repr(edit_error)}"
-                                )
-
-                    reminder["sent"] = True
-                    reminder["sent_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    changed = True
-
-            if changed:
-                save_reminders(reminders)
-
-        except Exception as e:
-            logger.error(f"Ошибка reminder loop: {type(e).__name__}: {repr(e)}")
-
-        await asyncio.sleep(30)
+    except Exception as e:
+        logger.error(f"Ошибка reminder job: {type(e).__name__}: {repr(e)}")
 
 
 # =========================

@@ -55,7 +55,7 @@ from helpers import (
     load_database,
     load_reminders,
     add_reminder,
-    reminders_loop,
+    reminders_job,
     set_pending_content,
     get_pending_content,
     clear_pending_content,
@@ -439,6 +439,16 @@ async def update_post_message(query, item):
             logger.error(f"Не удалось обновить пост: {type(e).__name__}: {repr(e)}")
 
 
+
+def log_background_task_result(task):
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        logger.warning("Background save task was cancelled.")
+    except Exception as e:
+        logger.error(f"Background save task crashed: {type(e).__name__}: {repr(e)}")
+
+
 async def start_save_background_task(query, context: ContextTypes.DEFAULT_TYPE):
     """
     Starts long save/download/screenshot work in the background.
@@ -453,7 +463,8 @@ async def start_save_background_task(query, context: ContextTypes.DEFAULT_TYPE):
         return
 
     context.application.bot_data[f"processing_{user_id}"] = True
-    context.application.create_task(save_selected_content(query, context))
+    task = asyncio.create_task(save_selected_content(query, context))
+    task.add_done_callback(log_background_task_result)
 
 
 # =========================
@@ -1969,7 +1980,18 @@ async def post_init(application):
         ("id", "Get chat ID"),
     ])
 
-    application.create_task(reminders_loop(application))
+    if application.job_queue:
+        application.job_queue.run_repeating(
+            reminders_job,
+            interval=30,
+            first=10,
+            name="reminders_job"
+        )
+        logger.info("Reminder job scheduled.")
+    else:
+        logger.warning(
+            "JobQueue is not available. Install python-telegram-bot[job-queue] to enable reminders."
+        )
 
 
 def main():
