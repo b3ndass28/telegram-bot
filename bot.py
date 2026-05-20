@@ -329,79 +329,44 @@ async def download_video(url: str):
 
 async def close_instagram_popups(page):
     """
-    Пытается закрыть Instagram popup окна:
-    Save your login info, Not now, cookies, крестик и другие модалки.
+    Быстро закрывает Instagram popup окна.
     """
 
-    # 1. Пробуем закрыть по тексту кнопок
-    popup_texts = [
-        "Not now",
-        "Not Now",
-        "Not now.",
-        "Maybe later",
-        "Allow all cookies",
-        "Accept all",
-        "Accept",
-        "Save info",
-        "Save your login info?"
+    quick_selectors = [
+        "text=Not now",
+        "text=Not Now",
+        "text=Maybe later",
+        "text=Allow all cookies",
+        "text=Accept all",
+        "text=Accept"
     ]
 
-    for text in popup_texts:
+    for selector in quick_selectors:
         try:
-            await page.get_by_text(text, exact=False).click(timeout=2500)
-            await page.wait_for_timeout(1500)
+            await page.locator(selector).click(timeout=1000)
+            await page.wait_for_timeout(500)
+            return
         except Exception:
             pass
 
-    # 2. Отдельно пробуем locator по тексту Not now
     try:
-        await page.locator("text=Not now").click(timeout=3000)
-        await page.wait_for_timeout(2000)
+        await page.get_by_role("button", name=re.compile("Not now", re.I)).click(timeout=1000)
+        await page.wait_for_timeout(500)
+        return
     except Exception:
         pass
 
-    try:
-        await page.locator("text=Not Now").click(timeout=3000)
-        await page.wait_for_timeout(2000)
-    except Exception:
-        pass
-
-    # 3. Пробуем role button
-    try:
-        await page.get_by_role("button", name=re.compile("Not now", re.I)).click(timeout=3000)
-        await page.wait_for_timeout(2000)
-    except Exception:
-        pass
-
-    try:
-        await page.get_by_role("button", name=re.compile("Not Now", re.I)).click(timeout=3000)
-        await page.wait_for_timeout(2000)
-    except Exception:
-        pass
-
-    # 4. Пробуем Escape
     try:
         await page.keyboard.press("Escape")
-        await page.wait_for_timeout(1500)
+        await page.wait_for_timeout(500)
     except Exception:
         pass
 
-    # 5. Пробуем кликнуть по крестику справа сверху.
-    # Viewport 390x844 с device_scale_factor=2.
-    # Координаты клика в CSS px, поэтому крестик примерно справа сверху: x=358, y=65.
-    possible_close_points = [
-        (358, 65),
-        (360, 70),
-        (350, 60),
-        (365, 58)
-    ]
-
-    for x, y in possible_close_points:
-        try:
-            await page.mouse.click(x, y)
-            await page.wait_for_timeout(1500)
-        except Exception:
-            pass
+    try:
+        await page.mouse.click(358, 65)
+        await page.wait_for_timeout(500)
+    except Exception:
+        pass
 
 
 async def make_instagram_profile_screenshot(url: str):
@@ -440,24 +405,20 @@ async def make_instagram_profile_screenshot(url: str):
 
         page = await context.new_page()
 
-        await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-        await page.wait_for_timeout(7000)
+        await page.goto(url, wait_until="domcontentloaded", timeout=25000)
+        await page.wait_for_timeout(2500)
 
-        # Закрываем popup'ы несколько раз, потому что Instagram иногда показывает их не сразу
-        await close_instagram_popups(page)
-        await page.wait_for_timeout(2000)
         await close_instagram_popups(page)
 
-        # Небольшая прокрутка вниз-вверх, чтобы профиль догрузился
         try:
-            await page.mouse.wheel(0, 300)
-            await page.wait_for_timeout(1500)
-            await page.mouse.wheel(0, -300)
-            await page.wait_for_timeout(1500)
+            await page.mouse.wheel(0, 200)
+            await page.wait_for_timeout(500)
+            await page.mouse.wheel(0, -200)
+            await page.wait_for_timeout(500)
         except Exception:
             pass
 
-        await page.wait_for_timeout(3000)
+        await page.wait_for_timeout(1000)
 
         await page.screenshot(
             path=screenshot_path,
@@ -574,7 +535,10 @@ async def on_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"🎬 {platform}"
             )
 
-            media_path = await make_instagram_profile_screenshot(url)
+            media_path = await asyncio.wait_for(
+                make_instagram_profile_screenshot(url),
+                timeout=25
+            )
 
             with open(media_path, "rb") as photo_file:
                 if topic_id is not None:
