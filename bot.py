@@ -6,6 +6,7 @@ import uuid
 import csv
 import asyncio
 import threading
+import time
 from pathlib import Path
 from datetime import datetime
 
@@ -66,12 +67,13 @@ logger = logging.getLogger(__name__)
 # =========================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-
 CHAT_ID = -1003794802790
 
 PENDING_FILE = "pending.json"
 TOPICS_FILE = "topics.json"
 DATABASE_FILE = "database.json"
+REMINDERS_FILE = "reminders.json"
+
 DOWNLOAD_DIR = "downloads"
 COOKIES_FILE = "cookies.txt"
 
@@ -81,7 +83,6 @@ INFO_IMAGE = os.path.join(ASSETS_DIR, "info.jpg")
 EXPORT_IMAGE = os.path.join(ASSETS_DIR, "export.jpg")
 
 Path(DOWNLOAD_DIR).mkdir(exist_ok=True)
-
 
 DEFAULT_TOPICS = {
     "CowGirl": {"id": 2, "icon": "🤠"},
@@ -93,13 +94,11 @@ DEFAULT_TOPICS = {
     "Instagram": {"id": 22, "icon": "📸"}
 }
 
-
 PRIORITIES = {
     "high": {"label": "🔥 High", "short": "High"},
     "normal": {"label": "⭐ Normal", "short": "Normal"},
     "later": {"label": "🧊 Later", "short": "Later"}
 }
-
 
 STATUSES = {
     "new": "🆕 New",
@@ -108,46 +107,71 @@ STATUSES = {
     "bad": "❌ Not Suitable"
 }
 
+REMINDER_OPTIONS = {
+    "tomorrow": {"label": "⏰ Tomorrow", "seconds": 24 * 60 * 60},
+    "3days": {"label": "📅 3 Days", "seconds": 3 * 24 * 60 * 60},
+    "7days": {"label": "🗓️ 7 Days", "seconds": 7 * 24 * 60 * 60}
+}
+
 
 # =========================
-# TOPIC HELPERS
+# JSON HELPERS
+# =========================
+
+def load_json_file(path, default):
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            logger.error(f"Ошибка чтения {path}: {e}")
+    return default
+
+
+def save_json_file(path, data):
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error(f"Ошибка сохранения {path}: {e}")
+
+
+# =========================
+# TOPICS
 # =========================
 
 def load_topics():
-    if os.path.exists(TOPICS_FILE):
-        try:
-            with open(TOPICS_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
+    data = load_json_file(TOPICS_FILE, None)
 
-            fixed = {}
+    if not data:
+        save_topics(DEFAULT_TOPICS)
+        return DEFAULT_TOPICS.copy()
 
-            for name, value in data.items():
-                if isinstance(value, dict):
-                    fixed[name] = {
-                        "id": int(value.get("id")),
-                        "icon": value.get("icon", "📂")
-                    }
-                else:
-                    fixed[name] = {
-                        "id": int(value),
-                        "icon": "📂"
-                    }
+    fixed = {}
 
-            return fixed
+    try:
+        for name, value in data.items():
+            if isinstance(value, dict):
+                fixed[name] = {
+                    "id": int(value.get("id")),
+                    "icon": value.get("icon", "📂")
+                }
+            else:
+                fixed[name] = {
+                    "id": int(value),
+                    "icon": "📂"
+                }
 
-        except Exception as e:
-            logger.error(f"Ошибка чтения topics.json: {e}")
+        return fixed
 
-    save_topics(DEFAULT_TOPICS)
-    return DEFAULT_TOPICS.copy()
+    except Exception as e:
+        logger.error(f"Ошибка нормализации topics.json: {e}")
+        save_topics(DEFAULT_TOPICS)
+        return DEFAULT_TOPICS.copy()
 
 
 def save_topics(topics):
-    try:
-        with open(TOPICS_FILE, "w", encoding="utf-8") as f:
-            json.dump(topics, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        logger.error(f"Ошибка сохранения topics.json: {e}")
+    save_json_file(TOPICS_FILE, topics)
 
 
 def get_topic_names():
@@ -157,21 +181,13 @@ def get_topic_names():
 def get_topic_id(name):
     topics = load_topics()
     item = topics.get(name)
-
-    if not item:
-        return None
-
-    return item.get("id")
+    return item.get("id") if item else None
 
 
 def get_topic_icon(name):
     topics = load_topics()
     item = topics.get(name)
-
-    if not item:
-        return "📂"
-
-    return item.get("icon", "📂")
+    return item.get("icon", "📂") if item else "📂"
 
 
 def guess_topic_icon(name):
@@ -218,30 +234,16 @@ def topics_text():
 
 
 # =========================
-# DATABASE HELPERS
+# DATABASE
 # =========================
 
 def load_database():
-    if os.path.exists(DATABASE_FILE):
-        try:
-            with open(DATABASE_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-
-            if isinstance(data, list):
-                return data
-
-        except Exception as e:
-            logger.error(f"Ошибка чтения database.json: {e}")
-
-    return []
+    data = load_json_file(DATABASE_FILE, [])
+    return data if isinstance(data, list) else []
 
 
 def save_database(data):
-    try:
-        with open(DATABASE_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        logger.error(f"Ошибка сохранения database.json: {e}")
+    save_json_file(DATABASE_FILE, data)
 
 
 def add_database_item(item):
@@ -250,13 +252,19 @@ def add_database_item(item):
     save_database(data)
 
 
-def update_database_status(item_id, status):
+def find_database_item(item_id):
+    for item in load_database():
+        if item.get("id") == item_id:
+            return item
+    return None
+
+
+def update_database_item(item_id, updates):
     data = load_database()
 
     for item in data:
         if item.get("id") == item_id:
-            item["status"] = status
-            item["status_label"] = STATUSES.get(status, status)
+            item.update(updates)
             item["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             save_database(data)
             return item
@@ -264,37 +272,100 @@ def update_database_status(item_id, status):
     return None
 
 
-def find_database_item(item_id):
-    data = load_database()
+# =========================
+# REMINDERS
+# =========================
 
-    for item in data:
-        if item.get("id") == item_id:
-            return item
+def load_reminders():
+    data = load_json_file(REMINDERS_FILE, [])
+    return data if isinstance(data, list) else []
 
-    return None
+
+def save_reminders(data):
+    save_json_file(REMINDERS_FILE, data)
+
+
+def add_reminder(item_id, user_id, due_ts, label):
+    reminders = load_reminders()
+
+    reminder = {
+        "id": str(uuid.uuid4()),
+        "item_id": item_id,
+        "user_id": user_id,
+        "due_ts": due_ts,
+        "label": label,
+        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "sent": False
+    }
+
+    reminders.append(reminder)
+    save_reminders(reminders)
+    return reminder
+
+
+async def reminders_loop(application: Application):
+    await asyncio.sleep(10)
+
+    while True:
+        try:
+            now = time.time()
+            reminders = load_reminders()
+            changed = False
+
+            for reminder in reminders:
+                if reminder.get("sent"):
+                    continue
+
+                if reminder.get("due_ts", 0) <= now:
+                    item = find_database_item(reminder.get("item_id"))
+
+                    if item:
+                        text = (
+                            f"🔔 Reminder\n\n"
+                            f"Пора вернуться к идее:\n\n"
+                            f"🎬 {item.get('platform', '')}\n"
+                            f"⚡ Priority: {item.get('priority_label', '')}\n"
+                            f"📌 Status: {item.get('status_label', '')}\n\n"
+                            f"🔗 Link:\n{item.get('url', '')}\n\n"
+                            f"💭 Notes:\n{item.get('notes', '')}"
+                        )
+
+                        try:
+                            await application.bot.send_message(
+                                chat_id=reminder.get("user_id"),
+                                text=text
+                            )
+                        except Exception as e:
+                            logger.error(f"Не удалось отправить reminder: {type(e).__name__}: {repr(e)}")
+
+                    reminder["sent"] = True
+                    reminder["sent_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    changed = True
+
+            if changed:
+                save_reminders(reminders)
+
+        except Exception as e:
+            logger.error(f"Ошибка reminder loop: {type(e).__name__}: {repr(e)}")
+
+        await asyncio.sleep(60)
+
+
+async def post_init(application: Application):
+    application.create_task(reminders_loop(application))
 
 
 # =========================
-# FILE HELPERS
+# PENDING
 # =========================
 
 def load_pending():
-    if os.path.exists(PENDING_FILE):
-        try:
-            with open(PENDING_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception as e:
-            logger.error(f"Ошибка чтения pending.json: {e}")
-            return {}
-    return {}
+    data = load_json_file(PENDING_FILE, {})
+    return data if isinstance(data, dict) else {}
 
 
 def save_pending(data):
-    try:
-        with open(PENDING_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        logger.error(f"Ошибка сохранения pending.json: {e}")
+    save_json_file(PENDING_FILE, data)
 
 
 def set_pending_content(user_id, content):
@@ -315,7 +386,7 @@ def clear_pending_content(user_id):
 
 
 # =========================
-# TELEGRAM HELPERS
+# GENERAL HELPERS
 # =========================
 
 def has_link(text: str) -> bool:
@@ -391,6 +462,21 @@ def safe_file_exists(path):
     return os.path.exists(path) and os.path.isfile(path)
 
 
+def build_caption(platform, url, thought, priority_label, status_label, reminder_label=None):
+    reminder_line = ""
+    if reminder_label:
+        reminder_line = f"\n🔔 Reminder: {reminder_label}"
+
+    return (
+        f"🎬 {platform}\n\n"
+        f"⚡ Priority: {priority_label}\n"
+        f"📌 Status: {status_label}"
+        f"{reminder_line}\n\n"
+        f"🔗 Link:\n{url}\n\n"
+        f"💭 Notes:\n{thought}"
+    )
+
+
 async def send_photo_or_text_message(message, image_path, caption, reply_markup=None):
     if safe_file_exists(image_path):
         with open(image_path, "rb") as photo:
@@ -426,14 +512,29 @@ async def edit_or_send_photo(query, image_path, caption, reply_markup=None):
         )
 
 
-def build_caption(platform, url, thought, priority_label, status_label):
-    return (
-        f"🎬 {platform}\n\n"
-        f"⚡ Priority: {priority_label}\n"
-        f"📌 Status: {status_label}\n\n"
-        f"🔗 Link:\n{url}\n\n"
-        f"💭 Notes:\n{thought}"
+async def update_post_message(query, item):
+    new_caption = build_caption(
+        item.get("platform", "Unknown"),
+        item.get("url", ""),
+        item.get("notes", ""),
+        item.get("priority_label", ""),
+        item.get("status_label", ""),
+        item.get("reminder_label")
     )
+
+    try:
+        await query.edit_message_caption(
+            caption=new_caption,
+            reply_markup=build_post_action_keyboard(item.get("id"))
+        )
+    except Exception:
+        try:
+            await query.edit_message_text(
+                text=new_caption,
+                reply_markup=build_post_action_keyboard(item.get("id"))
+            )
+        except Exception as e:
+            logger.error(f"Не удалось обновить пост: {type(e).__name__}: {repr(e)}")
 
 
 # =========================
@@ -448,15 +549,15 @@ def build_reply_panel():
             KeyboardButton("📤 Export")
         ],
         [
-            KeyboardButton("✅ Check"),
-            KeyboardButton("❌ Hide Panel")
+            KeyboardButton("✅ Check")
         ]
     ]
 
     return ReplyKeyboardMarkup(
         keyboard,
         resize_keyboard=True,
-        one_time_keyboard=False
+        one_time_keyboard=False,
+        is_persistent=True
     )
 
 
@@ -480,15 +581,9 @@ def build_main_menu_keyboard():
 
 def build_topics_menu_keyboard():
     keyboard = [
-        [
-            InlineKeyboardButton("➕ Создать новый", callback_data="topics_create")
-        ],
-        [
-            InlineKeyboardButton("✏️ Изменить текущий", callback_data="topics_rename")
-        ],
-        [
-            InlineKeyboardButton("🗑️ Удалить", callback_data="topics_delete")
-        ],
+        [InlineKeyboardButton("➕ Создать новый", callback_data="topics_create")],
+        [InlineKeyboardButton("✏️ Изменить текущий", callback_data="topics_rename")],
+        [InlineKeyboardButton("🗑️ Удалить", callback_data="topics_delete")],
         [
             InlineKeyboardButton("⬅️ Назад", callback_data="menu_main"),
             InlineKeyboardButton("❌ Закрыть", callback_data="menu_close")
@@ -535,35 +630,84 @@ def build_topic_keyboard():
         keyboard.append(row)
 
     keyboard.append([
-        InlineKeyboardButton("❌ Отмена", callback_data="cancel")
+        InlineKeyboardButton("❌ Отмена", callback_data="cancel_save")
     ])
 
     return InlineKeyboardMarkup(keyboard)
 
 
-def build_priority_keyboard():
+def build_initial_priority_keyboard():
     keyboard = [
         [
-            InlineKeyboardButton("🔥 High", callback_data="priority_high"),
-            InlineKeyboardButton("⭐ Normal", callback_data="priority_normal"),
-            InlineKeyboardButton("🧊 Later", callback_data="priority_later")
+            InlineKeyboardButton("🔥 High", callback_data="save_priority_high"),
+            InlineKeyboardButton("⭐ Normal", callback_data="save_priority_normal"),
+            InlineKeyboardButton("🧊 Later", callback_data="save_priority_later")
         ],
         [
-            InlineKeyboardButton("❌ Отмена", callback_data="cancel")
+            InlineKeyboardButton("❌ Отмена", callback_data="cancel_save")
         ]
     ]
 
     return InlineKeyboardMarkup(keyboard)
 
 
-def build_status_keyboard(item_id):
+def build_post_action_keyboard(item_id):
     keyboard = [
         [
-            InlineKeyboardButton("🟡 В работе", callback_data=f"status_progress:{item_id}"),
-            InlineKeyboardButton("✅ Сделано", callback_data=f"status_done:{item_id}")
+            InlineKeyboardButton("⚡ Priority", callback_data=f"post_priority_menu:{item_id}"),
+            InlineKeyboardButton("📌 Status", callback_data=f"post_status_menu:{item_id}")
         ],
         [
-            InlineKeyboardButton("❌ Не подходит", callback_data=f"status_bad:{item_id}")
+            InlineKeyboardButton("🔔 Reminder", callback_data=f"post_reminder_menu:{item_id}")
+        ]
+    ]
+
+    return InlineKeyboardMarkup(keyboard)
+
+
+def build_priority_manage_keyboard(item_id):
+    keyboard = [
+        [
+            InlineKeyboardButton("🔥 High", callback_data=f"post_priority_set:high:{item_id}"),
+            InlineKeyboardButton("⭐ Normal", callback_data=f"post_priority_set:normal:{item_id}"),
+            InlineKeyboardButton("🧊 Later", callback_data=f"post_priority_set:later:{item_id}")
+        ],
+        [
+            InlineKeyboardButton("⬅️ Назад", callback_data=f"post_back:{item_id}")
+        ]
+    ]
+
+    return InlineKeyboardMarkup(keyboard)
+
+
+def build_status_manage_keyboard(item_id):
+    keyboard = [
+        [
+            InlineKeyboardButton("🟡 В работе", callback_data=f"post_status_set:progress:{item_id}"),
+            InlineKeyboardButton("✅ Сделано", callback_data=f"post_status_set:done:{item_id}")
+        ],
+        [
+            InlineKeyboardButton("❌ Не подходит", callback_data=f"post_status_set:bad:{item_id}")
+        ],
+        [
+            InlineKeyboardButton("⬅️ Назад", callback_data=f"post_back:{item_id}")
+        ]
+    ]
+
+    return InlineKeyboardMarkup(keyboard)
+
+
+def build_reminder_manage_keyboard(item_id):
+    keyboard = [
+        [
+            InlineKeyboardButton("⏰ Tomorrow", callback_data=f"post_reminder_set:tomorrow:{item_id}"),
+            InlineKeyboardButton("📅 3 Days", callback_data=f"post_reminder_set:3days:{item_id}")
+        ],
+        [
+            InlineKeyboardButton("🗓️ 7 Days", callback_data=f"post_reminder_set:7days:{item_id}")
+        ],
+        [
+            InlineKeyboardButton("⬅️ Назад", callback_data=f"post_back:{item_id}")
         ]
     ]
 
@@ -1126,6 +1270,7 @@ def create_export_csv():
         "notes",
         "priority",
         "status",
+        "reminder",
         "message_id",
         "chat_id"
     ]
@@ -1144,6 +1289,7 @@ def create_export_csv():
                 "notes": item.get("notes", ""),
                 "priority": item.get("priority_label", item.get("priority", "")),
                 "status": item.get("status_label", item.get("status", "")),
+                "reminder": item.get("reminder_label", ""),
                 "message_id": item.get("message_id", ""),
                 "chat_id": item.get("chat_id", "")
             })
@@ -1152,14 +1298,56 @@ def create_export_csv():
 
 
 # =========================
-# MENU HANDLERS
+# MENU / COMMANDS
 # =========================
+
+INFO_TEXT = (
+    "ℹ️ Referens Bot\n\n"
+    "Referens Bot — это личная система для сохранения контент-референсов.\n\n"
+    "Главная идея бота: ты отправляешь ссылку на видео, пост или Instagram-аккаунт, "
+    "добавляешь свои мысли, а бот сохраняет всё в удобном виде — уже с медиа, "
+    "заметками, приоритетом, статусом и возможностью поставить напоминание.\n\n"
+    "Что делает бот:\n\n"
+    "🎬 Сохраняет видео-референсы\n"
+    "Отправь ссылку на Instagram Reel, TikTok, YouTube или другой поддерживаемый источник — "
+    "бот попробует скачать видео и отправить его в нужный топик.\n\n"
+    "💭 Сохраняет твои заметки\n"
+    "Вместе с видео бот сохраняет твои мысли: что понравилось, как можно адаптировать идею, "
+    "какой хук, стиль, поза, монтаж или сценарий стоит повторить.\n\n"
+    "📸 Делает скрин Instagram-аккаунтов\n"
+    "Если отправить ссылку на Instagram-профиль, бот делает скрин аккаунта в мобильном стиле "
+    "и сохраняет его как референс вместе с твоими заметками.\n\n"
+    "📂 Раскладывает всё по топикам\n"
+    "Ты выбираешь, куда сохранить идею. Топики можно создавать, переименовывать и удалять прямо через бота.\n\n"
+    "⚡ Добавляет приоритет\n"
+    "🔥 High — важная идея, которую стоит использовать быстрее\n"
+    "⭐ Normal — обычная хорошая идея\n"
+    "🧊 Later — идея на потом\n\n"
+    "📌 Позволяет менять статус\n"
+    "🆕 New — новая идея\n"
+    "🟡 In Progress — в работе\n"
+    "✅ Done — сделано\n"
+    "❌ Not Suitable — не подходит\n\n"
+    "🔔 Ставит напоминания\n"
+    "Можно поставить напоминание, чтобы бот позже вернул тебя к идее: завтра, через 3 дня или через 7 дней.\n\n"
+    "📤 Экспортирует базу\n"
+    "Все сохранённые идеи можно выгрузить в JSON или CSV.\n\n"
+    "Как пользоваться:\n\n"
+    "1. Отправь ссылку и свои мысли одним сообщением.\n"
+    "2. Выбери топик.\n"
+    "3. Выбери приоритет.\n"
+    "4. Бот сохранит референс в нужный раздел.\n"
+    "5. Позже можно изменить статус, приоритет или поставить напоминание.\n\n"
+    "Пример:\n"
+    "https://www.instagram.com/reel/... хороший хук в начале, можно адаптировать под cowgirl-видео"
+)
+
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Привет 👋\n\n"
         "Отправь мне ссылку и мысли одним сообщением.\n\n"
-        "Или открой панель:",
+        "Панель открыта снизу ✅",
         reply_markup=build_reply_panel()
     )
 
@@ -1195,27 +1383,10 @@ async def topics_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def info_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (
-        "ℹ️ Referens Bot\n\n"
-        "Что умеет бот:\n\n"
-        "1. Сохранять Instagram Reels / TikTok / YouTube ссылки.\n"
-        "2. Скачивать видео через yt-dlp, если это возможно.\n"
-        "3. Делать скрин Instagram-профиля через Playwright + cookies.\n"
-        "4. Сохранять notes вместе с ссылкой.\n"
-        "5. Выбирать топик через кнопки.\n"
-        "6. Ставить priority: 🔥 High / ⭐ Normal / 🧊 Later.\n"
-        "7. Менять status идеи: 🟡 In Progress / ✅ Done / ❌ Not Suitable.\n"
-        "8. Управлять топиками через меню.\n"
-        "9. Экспортировать базу в JSON или CSV.\n\n"
-        "Как пользоваться:\n\n"
-        "Отправь ссылку + заметку одним сообщением.\n"
-        "Потом выбери топик и priority."
-    )
-
     await send_photo_or_text_message(
         update.message,
         INFO_IMAGE,
-        text,
+        INFO_TEXT,
         reply_markup=build_main_menu_keyboard()
     )
 
@@ -1230,12 +1401,51 @@ async def export_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def add_topic_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if len(context.args) == 1:
+        name = context.args[0].strip()
+
+        try:
+            created = await context.bot.create_forum_topic(
+                chat_id=CHAT_ID,
+                name=name
+            )
+
+            topic_id = created.message_thread_id
+            topics = load_topics()
+
+            if name in topics:
+                await update.message.reply_text(f"Топик {name} уже есть в боте.")
+                return
+
+            topics[name] = {
+                "id": topic_id,
+                "icon": guess_topic_icon(name)
+            }
+
+            save_topics(topics)
+
+            await update.message.reply_text(
+                f"✅ Telegram-топик создан и добавлен в бота:\n\n"
+                f"{topics[name]['icon']} {name} — ID: {topic_id}"
+            )
+            return
+
+        except Exception as e:
+            await update.message.reply_text(
+                f"❌ Не удалось создать Telegram-топик.\n\n"
+                f"Проверь, что бот админ и имеет право Manage Topics.\n\n"
+                f"Ошибка: {e}"
+            )
+            return
+
     if len(context.args) < 2:
         await update.message.reply_text(
             "Используй так:\n\n"
-            "/addtopic Название ID\n\n"
-            "Пример:\n"
-            "/addtopic Cars 25"
+            "/addtopic Название\n"
+            "чтобы бот сам создал Telegram-топик\n\n"
+            "или:\n"
+            "/addtopic Название ID\n"
+            "если тема уже существует"
         )
         return
 
@@ -1262,7 +1472,7 @@ async def add_topic_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_topics(topics)
 
     await update.message.reply_text(
-        f"✅ Топик добавлен:\n\n"
+        f"✅ Топик добавлен вручную:\n\n"
         f"{topics[name]['icon']} {name} — ID: {topic_id}"
     )
 
@@ -1290,6 +1500,22 @@ async def rename_topic_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Топик {new_name} уже существует.")
         return
 
+    topic_id = topics[old_name]["id"]
+
+    try:
+        await context.bot.edit_forum_topic(
+            chat_id=CHAT_ID,
+            message_thread_id=topic_id,
+            name=new_name
+        )
+    except Exception as e:
+        await update.message.reply_text(
+            f"❌ Не удалось переименовать Telegram-топик.\n\n"
+            f"Проверь права бота на управление темами.\n\n"
+            f"Ошибка: {e}"
+        )
+        return
+
     topics[new_name] = topics.pop(old_name)
     topics[new_name]["icon"] = guess_topic_icon(new_name)
 
@@ -1302,34 +1528,15 @@ async def rename_topic_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def delete_topic_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if len(context.args) < 1:
-        await update.message.reply_text(
-            "Используй так:\n\n"
-            "/deltopic Название\n\n"
-            "Пример:\n"
-            "/deltopic Cars"
-        )
-        return
-
-    name = context.args[0].strip()
-
-    topics = load_topics()
-
-    if name not in topics:
-        await update.message.reply_text(f"Топик {name} не найден.")
-        return
-
-    removed = topics.pop(name)
-    save_topics(topics)
-
     await update.message.reply_text(
-        f"🗑️ Топик удалён:\n\n"
-        f"{name} — ID: {removed.get('id')}"
+        "Удаление через команду отключено для безопасности.\n\n"
+        "Используй меню:\n"
+        "📂 Topics → 🗑️ Удалить → выбери топик → подтверди удаление."
     )
 
 
 # =========================
-# CALLBACKS
+# CALLBACKS: MENU
 # =========================
 
 async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1374,24 +1581,10 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "menu_info":
-        text = (
-            "ℹ️ Referens Bot\n\n"
-            "Что умеет бот:\n\n"
-            "1. Сохранять Instagram Reels / TikTok / YouTube ссылки.\n"
-            "2. Скачивать видео через yt-dlp, если это возможно.\n"
-            "3. Делать скрин Instagram-профиля через Playwright + cookies.\n"
-            "4. Сохранять notes вместе с ссылкой.\n"
-            "5. Выбирать топик через кнопки.\n"
-            "6. Ставить priority: 🔥 High / ⭐ Normal / 🧊 Later.\n"
-            "7. Менять status идеи.\n"
-            "8. Управлять топиками через меню.\n"
-            "9. Экспортировать базу в JSON или CSV."
-        )
-
         await edit_or_send_photo(
             query,
             INFO_IMAGE,
-            text,
+            INFO_TEXT,
             reply_markup=build_main_menu_keyboard()
         )
         return
@@ -1409,12 +1602,14 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cookies_exists = os.path.exists(COOKIES_FILE)
         topics = load_topics()
         database = load_database()
+        reminders = load_reminders()
 
         await query.edit_message_text(
             f"✅ Проверка бота\n\n"
             f"Cookies file: {'✅ найден' if cookies_exists else '❌ не найден'}\n"
             f"Topics count: {len(topics)}\n"
             f"Database items: {len(database)}\n"
+            f"Reminders count: {len(reminders)}\n"
             f"Docker mode: ✅ Playwright enabled",
             reply_markup=build_main_menu_keyboard()
         )
@@ -1425,14 +1620,11 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await query.edit_message_text(
             "➕ Создание нового топика\n\n"
-            "Отправь название и ID в таком формате:\n\n"
-            "Cars 25\n\n"
-            "Как узнать ID:\n"
-            "1. Зайди в нужный топик группы\n"
-            "2. Напиши /id\n"
-            "3. Возьми Thread ID\n\n"
-            "Доступные топики сейчас:\n\n"
-            f"{topics_text()}",
+            "Отправь название нового топика одним сообщением.\n\n"
+            "Пример:\n"
+            "Cars\n\n"
+            "Бот сам создаст Telegram-топик в группе и добавит его в список.\n\n"
+            "Важно: у бота должны быть права Manage Topics.",
             reply_markup=build_back_cancel_keyboard()
         )
         return
@@ -1476,7 +1668,8 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"✏️ Переименование топика\n\n"
             f"Текущий топик:\n"
             f"{icon} {topic_name} — ID: {topic_id}\n\n"
-            f"Отправь новое название одним сообщением:",
+            f"Отправь новое название одним сообщением.\n\n"
+            f"Бот переименует и Telegram-топик, и кнопку в боте.",
             reply_markup=build_back_cancel_keyboard()
         )
         return
@@ -1498,7 +1691,8 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             f"⚠️ Точно удалить топик?\n\n"
             f"{icon} {topic_name} — ID: {topic_id}\n\n"
-            f"Это удалит только кнопку из бота, сам Telegram-топик не удалится.",
+            f"Это удалит Telegram-топик из группы и уберёт его из бота.\n\n"
+            f"Действие лучше не делать случайно.",
             reply_markup=build_delete_confirm_keyboard(topic_name)
         )
         return
@@ -1510,6 +1704,22 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if topic_name not in topics:
             await query.edit_message_text(
                 "Топик уже не найден.",
+                reply_markup=build_topics_menu_keyboard()
+            )
+            return
+
+        topic_id = topics[topic_name]["id"]
+
+        try:
+            await context.bot.delete_forum_topic(
+                chat_id=CHAT_ID,
+                message_thread_id=topic_id
+            )
+        except Exception as e:
+            await query.edit_message_text(
+                f"❌ Не удалось удалить Telegram-топик.\n\n"
+                f"Проверь права бота на управление темами.\n\n"
+                f"Ошибка: {e}",
                 reply_markup=build_topics_menu_keyboard()
             )
             return
@@ -1556,30 +1766,33 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
 
-async def priority_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# =========================
+# CALLBACKS: SAVE FLOW
+# =========================
+
+async def save_priority_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
     data = query.data
     user_id = query.from_user.id
 
-    if data == "cancel":
+    if data == "cancel_save":
         context.user_data.pop("content", None)
         context.user_data.pop("selected_topic", None)
         context.user_data.pop("selected_topic_icon", None)
         clear_pending_content(user_id)
 
-        await query.edit_message_text(
-            "❌ Отменено.\n\n"
-            "Можешь отправить новую ссылку."
-        )
+        try:
+            await query.edit_message_caption("❌ Отменено.\n\nМожешь отправить новую ссылку.")
+        except Exception:
+            await query.edit_message_text("❌ Отменено.\n\nМожешь отправить новую ссылку.")
         return
 
-    priority_key = data.replace("priority_", "")
-    priority = PRIORITIES.get(priority_key)
+    priority_key = data.replace("save_priority_", "")
 
-    if not priority:
-        await query.edit_message_text("Ошибка: неизвестный priority.")
+    if priority_key not in PRIORITIES:
+        await query.message.reply_text("Ошибка: неизвестный priority.")
         return
 
     context.user_data["selected_priority"] = priority_key
@@ -1587,42 +1800,99 @@ async def priority_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await save_selected_content(query, context)
 
 
-async def status_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def post_action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
     data = query.data
-    status_part, item_id = data.split(":", 1)
-    status_key = status_part.replace("status_", "")
 
-    status_label = STATUSES.get(status_key)
-
-    if not status_label:
-        await query.answer("Unknown status", show_alert=True)
+    if data.startswith("post_priority_menu:"):
+        item_id = data.split(":", 1)[1]
+        await query.edit_message_reply_markup(reply_markup=build_priority_manage_keyboard(item_id))
         return
 
-    item = update_database_status(item_id, status_key)
-
-    if not item:
-        await query.answer("Item not found in database", show_alert=True)
+    if data.startswith("post_status_menu:"):
+        item_id = data.split(":", 1)[1]
+        await query.edit_message_reply_markup(reply_markup=build_status_manage_keyboard(item_id))
         return
 
-    new_caption = build_caption(
-        item.get("platform", "Unknown"),
-        item.get("url", ""),
-        item.get("notes", ""),
-        item.get("priority_label", ""),
-        item.get("status_label", status_label)
-    )
+    if data.startswith("post_reminder_menu:"):
+        item_id = data.split(":", 1)[1]
+        await query.edit_message_reply_markup(reply_markup=build_reminder_manage_keyboard(item_id))
+        return
 
-    try:
-        await query.edit_message_caption(
-            caption=new_caption,
-            reply_markup=build_status_keyboard(item_id)
-        )
-    except Exception as e:
-        logger.error(f"Ошибка обновления caption/status: {type(e).__name__}: {repr(e)}")
-        await query.answer("Status saved, but message caption was not updated", show_alert=True)
+    if data.startswith("post_back:"):
+        item_id = data.split(":", 1)[1]
+        await query.edit_message_reply_markup(reply_markup=build_post_action_keyboard(item_id))
+        return
+
+    if data.startswith("post_priority_set:"):
+        _, priority_key, item_id = data.split(":", 2)
+
+        priority = PRIORITIES.get(priority_key)
+
+        if not priority:
+            await query.answer("Unknown priority", show_alert=True)
+            return
+
+        item = update_database_item(item_id, {
+            "priority": priority_key,
+            "priority_label": priority["label"]
+        })
+
+        if not item:
+            await query.answer("Item not found", show_alert=True)
+            return
+
+        await update_post_message(query, item)
+        return
+
+    if data.startswith("post_status_set:"):
+        _, status_key, item_id = data.split(":", 2)
+
+        status_label = STATUSES.get(status_key)
+
+        if not status_label:
+            await query.answer("Unknown status", show_alert=True)
+            return
+
+        item = update_database_item(item_id, {
+            "status": status_key,
+            "status_label": status_label
+        })
+
+        if not item:
+            await query.answer("Item not found", show_alert=True)
+            return
+
+        await update_post_message(query, item)
+        return
+
+    if data.startswith("post_reminder_set:"):
+        _, reminder_key, item_id = data.split(":", 2)
+
+        option = REMINDER_OPTIONS.get(reminder_key)
+
+        if not option:
+            await query.answer("Unknown reminder", show_alert=True)
+            return
+
+        due_ts = time.time() + option["seconds"]
+        add_reminder(item_id, query.from_user.id, due_ts, option["label"])
+
+        item = update_database_item(item_id, {
+            "reminder": reminder_key,
+            "reminder_label": option["label"],
+            "reminder_due_ts": due_ts
+        })
+
+        if not item:
+            await query.answer("Item not found", show_alert=True)
+            return
+
+        await update_post_message(query, item)
+        await query.answer(f"Reminder set: {option['label']}", show_alert=False)
+        return
 
 
 # =========================
@@ -1664,10 +1934,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await check_cmd(update, context)
         return
 
-    if text == "❌ Hide Panel":
-        await hide_panel_cmd(update, context)
-        return
-
     if mode == "awaiting_new_topic":
         await handle_new_topic_text(update, context, text)
         return
@@ -1680,27 +1946,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_new_topic_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
-    parts = text.split()
+    name = text.strip()
 
-    if len(parts) < 2:
+    if not name:
         await update.message.reply_text(
-            "Нужно отправить название и ID.\n\n"
+            "Название не может быть пустым.\n\n"
             "Пример:\n"
-            "Cars 25",
+            "Cars",
             reply_markup=build_back_cancel_keyboard()
         )
         return
 
-    name = parts[0].strip()
-    topic_id_raw = parts[1].strip()
-
-    try:
-        topic_id = int(topic_id_raw)
-    except ValueError:
+    if len(name) > 128:
         await update.message.reply_text(
-            "ID должен быть числом.\n\n"
-            "Пример:\n"
-            "Cars 25",
+            "Название слишком длинное. Telegram-топик должен быть короче.",
             reply_markup=build_back_cancel_keyboard()
         )
         return
@@ -1710,6 +1969,23 @@ async def handle_new_topic_text(update: Update, context: ContextTypes.DEFAULT_TY
     if name in topics:
         await update.message.reply_text(
             f"Топик {name} уже существует.",
+            reply_markup=build_topics_menu_keyboard()
+        )
+        return
+
+    try:
+        created = await context.bot.create_forum_topic(
+            chat_id=CHAT_ID,
+            name=name
+        )
+
+        topic_id = created.message_thread_id
+
+    except Exception as e:
+        await update.message.reply_text(
+            f"❌ Не удалось создать Telegram-топик.\n\n"
+            f"Проверь, что бот админ и имеет право Manage Topics.\n\n"
+            f"Ошибка: {e}",
             reply_markup=build_topics_menu_keyboard()
         )
         return
@@ -1724,7 +2000,7 @@ async def handle_new_topic_text(update: Update, context: ContextTypes.DEFAULT_TY
     context.user_data.pop("mode", None)
 
     await update.message.reply_text(
-        f"✅ Топик добавлен:\n\n"
+        f"✅ Telegram-топик создан и добавлен в бота:\n\n"
         f"{topics[name]['icon']} {name} — ID: {topic_id}\n\n"
         f"{topics_text()}",
         reply_markup=build_topics_menu_keyboard()
@@ -1733,13 +2009,27 @@ async def handle_new_topic_text(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def handle_rename_topic_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
     old_name = context.user_data.get("selected_topic")
-    new_name = text.strip().split()[0]
+    new_name = text.strip()
 
     if not old_name:
         context.user_data.pop("mode", None)
         await update.message.reply_text(
             "Ошибка: топик не выбран.",
             reply_markup=build_topics_menu_keyboard()
+        )
+        return
+
+    if not new_name:
+        await update.message.reply_text(
+            "Новое название не может быть пустым.",
+            reply_markup=build_back_cancel_keyboard()
+        )
+        return
+
+    if len(new_name) > 128:
+        await update.message.reply_text(
+            "Название слишком длинное. Telegram-топик должен быть короче.",
+            reply_markup=build_back_cancel_keyboard()
         )
         return
 
@@ -1759,6 +2049,24 @@ async def handle_rename_topic_text(update: Update, context: ContextTypes.DEFAULT
         await update.message.reply_text(
             f"Топик {new_name} уже существует. Отправь другое название.",
             reply_markup=build_back_cancel_keyboard()
+        )
+        return
+
+    topic_id = topics[old_name]["id"]
+
+    try:
+        await context.bot.edit_forum_topic(
+            chat_id=CHAT_ID,
+            message_thread_id=topic_id,
+            name=new_name
+        )
+
+    except Exception as e:
+        await update.message.reply_text(
+            f"❌ Не удалось переименовать Telegram-топик.\n\n"
+            f"Проверь права бота на управление темами.\n\n"
+            f"Ошибка: {e}",
+            reply_markup=build_topics_menu_keyboard()
         )
         return
 
@@ -1807,22 +2115,25 @@ async def on_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_id = query.from_user.id
 
-    if query.data == "cancel":
+    if query.data == "cancel_save":
         context.user_data.pop("content", None)
         context.user_data.pop("selected_topic", None)
         context.user_data.pop("selected_topic_icon", None)
         clear_pending_content(user_id)
 
-        await query.edit_message_text(
-            "❌ Отменено.\n\n"
-            "Можешь отправить новую ссылку."
-        )
+        try:
+            await query.edit_message_caption("❌ Отменено.\n\nМожешь отправить новую ссылку.")
+        except Exception:
+            await query.edit_message_text("❌ Отменено.\n\nМожешь отправить новую ссылку.")
         return
 
     topic = query.data.replace("t_", "")
 
     if topic not in get_topic_names():
-        await query.edit_message_text("Ошибка: неизвестный топик.")
+        try:
+            await query.edit_message_caption("Ошибка: неизвестный топик.")
+        except Exception:
+            await query.edit_message_text("Ошибка: неизвестный топик.")
         return
 
     context.user_data["selected_topic"] = topic
@@ -1836,13 +2147,13 @@ async def on_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"{topic_icon} Topic: {topic}\n\n"
                 f"⚡ Выбери priority:"
             ),
-            reply_markup=build_priority_keyboard()
+            reply_markup=build_initial_priority_keyboard()
         )
     except Exception:
         await query.edit_message_text(
             f"{topic_icon} Topic: {topic}\n\n"
             f"⚡ Выбери priority:",
-            reply_markup=build_priority_keyboard()
+            reply_markup=build_initial_priority_keyboard()
         )
 
 
@@ -1854,26 +2165,23 @@ async def save_selected_content(query, context: ContextTypes.DEFAULT_TYPE):
     priority_key = context.user_data.get("selected_priority", "normal")
 
     if not content:
-        await query.edit_message_text(
-            "Ошибка: контент не найден. Отправь ссылку заново."
-        )
+        await query.message.reply_text("Ошибка: контент не найден. Отправь ссылку заново.")
         return
 
     if not topic:
-        await query.edit_message_text(
-            "Ошибка: топик не выбран. Отправь ссылку заново."
-        )
+        await query.message.reply_text("Ошибка: топик не выбран. Отправь ссылку заново.")
         return
 
     url, thought = extract_url_and_thought(content)
 
     if not url:
-        await query.edit_message_text("Ошибка: ссылка не найдена.")
+        await query.message.reply_text("Ошибка: ссылка не найдена.")
         return
 
     platform = detect_platform(url)
     topic_id = get_topic_id(topic)
     topic_icon = get_topic_icon(topic)
+
     priority_label = PRIORITIES.get(priority_key, PRIORITIES["normal"])["label"]
     status_key = "new"
     status_label = STATUSES[status_key]
@@ -1892,16 +2200,19 @@ async def save_selected_content(query, context: ContextTypes.DEFAULT_TYPE):
     sent_message = None
 
     try:
-        if is_instagram_profile(url):
-            await query.edit_message_caption(
-                caption=(
-                    f"📸 Делаю скрин профиля...\n\n"
-                    f"{topic_icon} {topic}\n"
-                    f"⚡ Priority: {priority_label}\n"
-                    f"🎬 {platform}"
-                )
-            )
+        loading_caption = (
+            f"⏳ Сохраняю референс...\n\n"
+            f"{topic_icon} {topic}\n"
+            f"⚡ Priority: {priority_label}\n"
+            f"🎬 {platform}"
+        )
 
+        try:
+            await query.edit_message_caption(caption=loading_caption)
+        except Exception:
+            await query.edit_message_text(loading_caption)
+
+        if is_instagram_profile(url):
             media_path = await make_instagram_profile_screenshot(url)
 
             with open(media_path, "rb") as photo_file:
@@ -1910,31 +2221,13 @@ async def save_selected_content(query, context: ContextTypes.DEFAULT_TYPE):
                     message_thread_id=topic_id,
                     photo=photo_file,
                     caption=caption_text,
-                    reply_markup=build_status_keyboard(item_id),
+                    reply_markup=build_post_action_keyboard(item_id),
                     read_timeout=120,
                     write_timeout=120,
                     connect_timeout=120
                 )
 
-            await query.edit_message_caption(
-                caption=(
-                    f"✅ Скрин профиля сохранен\n\n"
-                    f"{topic_icon} {topic}\n"
-                    f"⚡ Priority: {priority_label}\n"
-                    f"🎬 {platform}"
-                )
-            )
-
         else:
-            await query.edit_message_caption(
-                caption=(
-                    f"⏳ Скачиваю видео...\n\n"
-                    f"{topic_icon} {topic}\n"
-                    f"⚡ Priority: {priority_label}\n"
-                    f"🎬 {platform}"
-                )
-            )
-
             media_path = await download_video(url)
 
             with open(media_path, "rb") as video_file:
@@ -1943,21 +2236,24 @@ async def save_selected_content(query, context: ContextTypes.DEFAULT_TYPE):
                     message_thread_id=topic_id,
                     video=video_file,
                     caption=caption_text,
-                    reply_markup=build_status_keyboard(item_id),
+                    reply_markup=build_post_action_keyboard(item_id),
                     supports_streaming=True,
                     read_timeout=120,
                     write_timeout=120,
                     connect_timeout=120
                 )
 
-            await query.edit_message_caption(
-                caption=(
-                    f"✅ Видео сохранено\n\n"
-                    f"{topic_icon} {topic}\n"
-                    f"⚡ Priority: {priority_label}\n"
-                    f"🎬 {platform}"
-                )
-            )
+        success_caption = (
+            f"✅ Референс сохранён\n\n"
+            f"{topic_icon} {topic}\n"
+            f"⚡ Priority: {priority_label}\n"
+            f"🎬 {platform}"
+        )
+
+        try:
+            await query.edit_message_caption(caption=success_caption)
+        except Exception:
+            await query.edit_message_text(success_caption)
 
         db_item = {
             "id": item_id,
@@ -1973,6 +2269,8 @@ async def save_selected_content(query, context: ContextTypes.DEFAULT_TYPE):
             "priority_label": priority_label,
             "status": status_key,
             "status_label": status_label,
+            "reminder": None,
+            "reminder_label": None,
             "chat_id": CHAT_ID,
             "message_id": sent_message.message_id if sent_message else None
         }
@@ -2002,7 +2300,7 @@ async def save_selected_content(query, context: ContextTypes.DEFAULT_TYPE):
                 chat_id=CHAT_ID,
                 message_thread_id=topic_id,
                 text=fallback_text,
-                reply_markup=build_status_keyboard(item_id)
+                reply_markup=build_post_action_keyboard(item_id)
             )
 
             db_item = {
@@ -2019,6 +2317,8 @@ async def save_selected_content(query, context: ContextTypes.DEFAULT_TYPE):
                 "priority_label": priority_label,
                 "status": status_key,
                 "status_label": status_label,
+                "reminder": None,
+                "reminder_label": None,
                 "chat_id": CHAT_ID,
                 "message_id": sent_message.message_id if sent_message else None,
                 "media_failed": True
@@ -2026,22 +2326,17 @@ async def save_selected_content(query, context: ContextTypes.DEFAULT_TYPE):
 
             add_database_item(db_item)
 
+            fail_caption = (
+                f"⚠️ Медиа не обработалось, но пост сохранён текстом.\n\n"
+                f"{topic_icon} {topic}\n"
+                f"⚡ Priority: {priority_label}\n"
+                f"🎬 {platform}"
+            )
+
             try:
-                await query.edit_message_caption(
-                    caption=(
-                        f"⚠️ Медиа не обработалось, но пост сохранен текстом.\n\n"
-                        f"{topic_icon} {topic}\n"
-                        f"⚡ Priority: {priority_label}\n"
-                        f"🎬 {platform}"
-                    )
-                )
+                await query.edit_message_caption(caption=fail_caption)
             except Exception:
-                await query.edit_message_text(
-                    f"⚠️ Медиа не обработалось, но пост сохранен текстом.\n\n"
-                    f"{topic_icon} {topic}\n"
-                    f"⚡ Priority: {priority_label}\n"
-                    f"🎬 {platform}"
-                )
+                await query.edit_message_text(fail_caption)
 
             context.user_data.pop("content", None)
             context.user_data.pop("selected_topic", None)
@@ -2080,6 +2375,7 @@ async def check_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cookies_exists = os.path.exists(COOKIES_FILE)
     topics = load_topics()
     database = load_database()
+    reminders = load_reminders()
 
     await update.message.reply_text(
         f"Cookies file: {'✅ найден' if cookies_exists else '❌ не найден'}\n"
@@ -2088,7 +2384,8 @@ async def check_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Topics count: {len(topics)}\n"
         f"Database file: {os.path.abspath(DATABASE_FILE)}\n"
         f"Database items: {len(database)}\n"
-        f"Pending file: {os.path.abspath(PENDING_FILE)}\n"
+        f"Reminders file: {os.path.abspath(REMINDERS_FILE)}\n"
+        f"Reminders count: {len(reminders)}\n"
         f"Download dir: {os.path.abspath(DOWNLOAD_DIR)}\n"
         f"Docker mode: ✅ Playwright enabled"
     )
@@ -2110,7 +2407,7 @@ def main():
 
     threading.Thread(target=run_web_server, daemon=True).start()
 
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("panel", panel_cmd))
@@ -2127,9 +2424,9 @@ def main():
     app.add_handler(CommandHandler("check", check_cmd))
 
     app.add_handler(CallbackQueryHandler(menu_callback, pattern="^(menu_|topics_|rename_select:|delete_select:|confirm_delete:|export_)"))
-    app.add_handler(CallbackQueryHandler(priority_callback, pattern="^(priority_|cancel)"))
-    app.add_handler(CallbackQueryHandler(status_callback, pattern="^status_"))
-    app.add_handler(CallbackQueryHandler(on_topic, pattern="^(t_|cancel)"))
+    app.add_handler(CallbackQueryHandler(save_priority_callback, pattern="^(save_priority_|cancel_save)"))
+    app.add_handler(CallbackQueryHandler(post_action_callback, pattern="^post_"))
+    app.add_handler(CallbackQueryHandler(on_topic, pattern="^(t_|cancel_save)"))
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
