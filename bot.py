@@ -68,34 +68,13 @@ Path(DOWNLOAD_DIR).mkdir(exist_ok=True)
 
 
 DEFAULT_TOPICS = {
-    "CowGirl": {
-        "id": 2,
-        "icon": "🤠"
-    },
-    "Student": {
-        "id": 6,
-        "icon": "🎓"
-    },
-    "Meme": {
-        "id": 7,
-        "icon": "😂"
-    },
-    "Telegram": {
-        "id": 4,
-        "icon": "✈️"
-    },
-    "X": {
-        "id": 8,
-        "icon": "𝕏"
-    },
-    "Threads": {
-        "id": 9,
-        "icon": "🧵"
-    },
-    "Instagram": {
-        "id": 22,
-        "icon": "📸"
-    }
+    "CowGirl": {"id": 2, "icon": "🤠"},
+    "Student": {"id": 6, "icon": "🎓"},
+    "Meme": {"id": 7, "icon": "😂"},
+    "Telegram": {"id": 4, "icon": "✈️"},
+    "X": {"id": 8, "icon": "𝕏"},
+    "Threads": {"id": 9, "icon": "🧵"},
+    "Instagram": {"id": 22, "icon": "📸"}
 }
 
 
@@ -181,7 +160,7 @@ def guess_topic_icon(name):
         return "𝕏"
     if "thread" in lower:
         return "🧵"
-    if "car" in lower:
+    if "car" in lower or "auto" in lower:
         return "🏎️"
     if "idea" in lower:
         return "💡"
@@ -189,6 +168,22 @@ def guess_topic_icon(name):
         return "📌"
 
     return "📂"
+
+
+def topics_text():
+    topics = load_topics()
+
+    if not topics:
+        return "📂 Топиков пока нет."
+
+    lines = ["📂 Текущие топики:\n"]
+
+    for name, data in topics.items():
+        icon = data.get("icon", "📂")
+        topic_id = data.get("id")
+        lines.append(f"{icon} {name} — ID: {topic_id}")
+
+    return "\n".join(lines)
 
 
 # =========================
@@ -304,6 +299,44 @@ def is_instagram_profile(url: str) -> bool:
     return not any(part in url_lower for part in not_profile_parts)
 
 
+# =========================
+# KEYBOARDS
+# =========================
+
+def build_main_menu_keyboard():
+    keyboard = [
+        [
+            InlineKeyboardButton("📂 Топики", callback_data="menu_topics"),
+            InlineKeyboardButton("✅ Проверка", callback_data="menu_check")
+        ],
+        [
+            InlineKeyboardButton("❌ Закрыть", callback_data="menu_close")
+        ]
+    ]
+
+    return InlineKeyboardMarkup(keyboard)
+
+
+def build_topics_menu_keyboard():
+    keyboard = [
+        [
+            InlineKeyboardButton("➕ Создать новый", callback_data="topics_create")
+        ],
+        [
+            InlineKeyboardButton("✏️ Изменить текущий", callback_data="topics_rename")
+        ],
+        [
+            InlineKeyboardButton("🗑️ Удалить", callback_data="topics_delete")
+        ],
+        [
+            InlineKeyboardButton("⬅️ Назад", callback_data="menu_main"),
+            InlineKeyboardButton("❌ Закрыть", callback_data="menu_close")
+        ]
+    ]
+
+    return InlineKeyboardMarkup(keyboard)
+
+
 def build_topic_keyboard():
     topics = load_topics()
     buttons_per_row = 3
@@ -328,6 +361,52 @@ def build_topic_keyboard():
     keyboard.append([
         InlineKeyboardButton("❌ Отмена", callback_data="cancel")
     ])
+
+    return InlineKeyboardMarkup(keyboard)
+
+
+def build_topic_select_keyboard(action):
+    topics = load_topics()
+    keyboard = []
+
+    for name, data in topics.items():
+        icon = data.get("icon", "📂")
+        keyboard.append([
+            InlineKeyboardButton(
+                f"{icon} {name}",
+                callback_data=f"{action}:{name}"
+            )
+        ])
+
+    keyboard.append([
+        InlineKeyboardButton("⬅️ Назад", callback_data="menu_topics"),
+        InlineKeyboardButton("❌ Отмена", callback_data="menu_close")
+    ])
+
+    return InlineKeyboardMarkup(keyboard)
+
+
+def build_delete_confirm_keyboard(topic_name):
+    keyboard = [
+        [
+            InlineKeyboardButton("✅ Да, удалить", callback_data=f"confirm_delete:{topic_name}")
+        ],
+        [
+            InlineKeyboardButton("⬅️ Назад", callback_data="topics_delete"),
+            InlineKeyboardButton("❌ Отмена", callback_data="menu_close")
+        ]
+    ]
+
+    return InlineKeyboardMarkup(keyboard)
+
+
+def build_back_cancel_keyboard():
+    keyboard = [
+        [
+            InlineKeyboardButton("⬅️ Назад", callback_data="menu_topics"),
+            InlineKeyboardButton("❌ Отмена", callback_data="menu_close")
+        ]
+    ]
 
     return InlineKeyboardMarkup(keyboard)
 
@@ -518,7 +597,6 @@ async def click_continue_if_needed(page):
         logger.warning("Continue screen всё еще виден после клика.")
         return False
 
-    # 1. JS click
     try:
         clicked = await page.evaluate(
             """
@@ -569,7 +647,6 @@ async def click_continue_if_needed(page):
     except Exception as e:
         logger.warning(f"JS Continue click failed: {type(e).__name__}: {repr(e)}")
 
-    # 2. Selectors
     selectors = [
         "text=Continue",
         "text=Continue as",
@@ -590,7 +667,6 @@ async def click_continue_if_needed(page):
         except Exception:
             pass
 
-    # 3. Coordinates
     coordinate_clicks = [
         (195, 515),
         (195, 535),
@@ -819,47 +895,30 @@ async def make_instagram_profile_screenshot(url: str):
 
 
 # =========================
-# BOT COMMANDS
+# MENU HANDLERS
 # =========================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Привет 👋\n\n"
         "Отправь мне ссылку и мысли одним сообщением.\n\n"
-        "Примеры:\n"
-        "https://www.instagram.com/reel/... идея для поста\n\n"
-        "https://www.instagram.com/username/ реф аккаунт по вайбу\n\n"
-        "Команды:\n"
-        "/topics — список топиков\n"
-        "/addtopic Name ID — добавить топик\n"
-        "/renametopic OldName NewName — переименовать топик\n"
-        "/deltopic Name — удалить топик\n"
-        "/id — узнать ID чата/топика"
+        "Или открой меню:",
+        reply_markup=build_main_menu_keyboard()
+    )
+
+
+async def menu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "⚙️ Главное меню\n\nЧто хочешь сделать?",
+        reply_markup=build_main_menu_keyboard()
     )
 
 
 async def topics_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    topics = load_topics()
-
-    if not topics:
-        await update.message.reply_text("Топиков пока нет.")
-        return
-
-    lines = ["📂 Текущие топики:\n"]
-
-    for name, data in topics.items():
-        icon = data.get("icon", "📂")
-        topic_id = data.get("id")
-        lines.append(f"{icon} {name} — ID: {topic_id}")
-
-    lines.append("\nДобавить:")
-    lines.append("/addtopic Cars 25")
-    lines.append("\nПереименовать:")
-    lines.append("/renametopic Cars Auto")
-    lines.append("\nУдалить:")
-    lines.append("/deltopic Cars")
-
-    await update.message.reply_text("\n".join(lines))
+    await update.message.reply_text(
+        f"{topics_text()}\n\nЧто хочешь сделать?",
+        reply_markup=build_topics_menu_keyboard()
+    )
 
 
 async def add_topic_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -961,6 +1020,169 @@ async def delete_topic_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+# =========================
+# MENU CALLBACKS
+# =========================
+
+async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data
+    user_id = query.from_user.id
+
+    if data == "menu_main":
+        context.user_data.pop("mode", None)
+        context.user_data.pop("selected_topic", None)
+
+        await query.edit_message_text(
+            "⚙️ Главное меню\n\nЧто хочешь сделать?",
+            reply_markup=build_main_menu_keyboard()
+        )
+        return
+
+    if data == "menu_close":
+        context.user_data.pop("mode", None)
+        context.user_data.pop("selected_topic", None)
+        context.user_data.pop("content", None)
+        clear_pending_content(user_id)
+
+        await query.edit_message_text("✅ Закрыто.")
+        return
+
+    if data == "menu_topics":
+        context.user_data.pop("mode", None)
+        context.user_data.pop("selected_topic", None)
+
+        await query.edit_message_text(
+            f"{topics_text()}\n\nЧто хочешь сделать?",
+            reply_markup=build_topics_menu_keyboard()
+        )
+        return
+
+    if data == "menu_check":
+        cookies_exists = os.path.exists(COOKIES_FILE)
+        topics = load_topics()
+
+        await query.edit_message_text(
+            f"✅ Проверка бота\n\n"
+            f"Cookies file: {'✅ найден' if cookies_exists else '❌ не найден'}\n"
+            f"Topics count: {len(topics)}\n"
+            f"Docker mode: ✅ Playwright enabled",
+            reply_markup=build_main_menu_keyboard()
+        )
+        return
+
+    if data == "topics_create":
+        context.user_data["mode"] = "awaiting_new_topic"
+
+        await query.edit_message_text(
+            "➕ Создание нового топика\n\n"
+            "Отправь название и ID в таком формате:\n\n"
+            "Cars 25\n\n"
+            "Как узнать ID:\n"
+            "1. Зайди в нужный топик группы\n"
+            "2. Напиши /id\n"
+            "3. Возьми Thread ID\n\n"
+            "Доступные топики сейчас:\n\n"
+            f"{topics_text()}",
+            reply_markup=build_back_cancel_keyboard()
+        )
+        return
+
+    if data == "topics_rename":
+        context.user_data["mode"] = "select_rename_topic"
+
+        await query.edit_message_text(
+            "✏️ Выбери топик, который хочешь переименовать:",
+            reply_markup=build_topic_select_keyboard("rename_select")
+        )
+        return
+
+    if data == "topics_delete":
+        context.user_data["mode"] = "select_delete_topic"
+
+        await query.edit_message_text(
+            "🗑️ Выбери топик, который хочешь удалить:",
+            reply_markup=build_topic_select_keyboard("delete_select")
+        )
+        return
+
+    if data.startswith("rename_select:"):
+        topic_name = data.split(":", 1)[1]
+        topics = load_topics()
+
+        if topic_name not in topics:
+            await query.edit_message_text(
+                "Топик не найден.",
+                reply_markup=build_topics_menu_keyboard()
+            )
+            return
+
+        context.user_data["mode"] = "awaiting_rename_topic"
+        context.user_data["selected_topic"] = topic_name
+
+        icon = topics[topic_name].get("icon", "📂")
+        topic_id = topics[topic_name].get("id")
+
+        await query.edit_message_text(
+            f"✏️ Переименование топика\n\n"
+            f"Текущий топик:\n"
+            f"{icon} {topic_name} — ID: {topic_id}\n\n"
+            f"Отправь новое название одним сообщением:",
+            reply_markup=build_back_cancel_keyboard()
+        )
+        return
+
+    if data.startswith("delete_select:"):
+        topic_name = data.split(":", 1)[1]
+        topics = load_topics()
+
+        if topic_name not in topics:
+            await query.edit_message_text(
+                "Топик не найден.",
+                reply_markup=build_topics_menu_keyboard()
+            )
+            return
+
+        icon = topics[topic_name].get("icon", "📂")
+        topic_id = topics[topic_name].get("id")
+
+        await query.edit_message_text(
+            f"⚠️ Точно удалить топик?\n\n"
+            f"{icon} {topic_name} — ID: {topic_id}\n\n"
+            f"Это удалит только кнопку из бота, сам Telegram-топик не удалится.",
+            reply_markup=build_delete_confirm_keyboard(topic_name)
+        )
+        return
+
+    if data.startswith("confirm_delete:"):
+        topic_name = data.split(":", 1)[1]
+        topics = load_topics()
+
+        if topic_name not in topics:
+            await query.edit_message_text(
+                "Топик уже не найден.",
+                reply_markup=build_topics_menu_keyboard()
+            )
+            return
+
+        removed = topics.pop(topic_name)
+        save_topics(topics)
+
+        await query.edit_message_text(
+            f"🗑️ Топик удалён:\n\n"
+            f"{topic_name} — ID: {removed.get('id')}\n\n"
+            f"{topics_text()}",
+            reply_markup=build_topics_menu_keyboard()
+        )
+        return
+
+
+# =========================
+# MESSAGE HANDLERS
+# =========================
+
 async def save_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text(
@@ -978,7 +1200,116 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     text = update.message.text.strip()
+    mode = context.user_data.get("mode")
+
+    if mode == "awaiting_new_topic":
+        await handle_new_topic_text(update, context, text)
+        return
+
+    if mode == "awaiting_rename_topic":
+        await handle_rename_topic_text(update, context, text)
+        return
+
     await process_content(update, context, text)
+
+
+async def handle_new_topic_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
+    parts = text.split()
+
+    if len(parts) < 2:
+        await update.message.reply_text(
+            "Нужно отправить название и ID.\n\n"
+            "Пример:\n"
+            "Cars 25",
+            reply_markup=build_back_cancel_keyboard()
+        )
+        return
+
+    name = parts[0].strip()
+    topic_id_raw = parts[1].strip()
+
+    try:
+        topic_id = int(topic_id_raw)
+    except ValueError:
+        await update.message.reply_text(
+            "ID должен быть числом.\n\n"
+            "Пример:\n"
+            "Cars 25",
+            reply_markup=build_back_cancel_keyboard()
+        )
+        return
+
+    topics = load_topics()
+
+    if name in topics:
+        await update.message.reply_text(
+            f"Топик {name} уже существует.",
+            reply_markup=build_topics_menu_keyboard()
+        )
+        return
+
+    topics[name] = {
+        "id": topic_id,
+        "icon": guess_topic_icon(name)
+    }
+
+    save_topics(topics)
+
+    context.user_data.pop("mode", None)
+
+    await update.message.reply_text(
+        f"✅ Топик добавлен:\n\n"
+        f"{topics[name]['icon']} {name} — ID: {topic_id}\n\n"
+        f"{topics_text()}",
+        reply_markup=build_topics_menu_keyboard()
+    )
+
+
+async def handle_rename_topic_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
+    old_name = context.user_data.get("selected_topic")
+    new_name = text.strip().split()[0]
+
+    if not old_name:
+        context.user_data.pop("mode", None)
+        await update.message.reply_text(
+            "Ошибка: топик не выбран.",
+            reply_markup=build_topics_menu_keyboard()
+        )
+        return
+
+    topics = load_topics()
+
+    if old_name not in topics:
+        context.user_data.pop("mode", None)
+        context.user_data.pop("selected_topic", None)
+
+        await update.message.reply_text(
+            "Старый топик не найден.",
+            reply_markup=build_topics_menu_keyboard()
+        )
+        return
+
+    if new_name in topics:
+        await update.message.reply_text(
+            f"Топик {new_name} уже существует. Отправь другое название.",
+            reply_markup=build_back_cancel_keyboard()
+        )
+        return
+
+    topics[new_name] = topics.pop(old_name)
+    topics[new_name]["icon"] = guess_topic_icon(new_name)
+
+    save_topics(topics)
+
+    context.user_data.pop("mode", None)
+    context.user_data.pop("selected_topic", None)
+
+    await update.message.reply_text(
+        f"✅ Топик переименован:\n\n"
+        f"{old_name} → {topics[new_name]['icon']} {new_name}\n\n"
+        f"{topics_text()}",
+        reply_markup=build_topics_menu_keyboard()
+    )
 
 
 async def process_content(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
@@ -1139,6 +1470,10 @@ async def on_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
 
 
+# =========================
+# UTILITY COMMANDS
+# =========================
+
 async def chat_id_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     thread_id = update.message.message_thread_id
@@ -1184,6 +1519,7 @@ def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("menu", menu_cmd))
     app.add_handler(CommandHandler("save", save_cmd))
     app.add_handler(CommandHandler("topics", topics_cmd))
     app.add_handler(CommandHandler("addtopic", add_topic_cmd))
@@ -1192,9 +1528,10 @@ def main():
     app.add_handler(CommandHandler("id", chat_id_cmd))
     app.add_handler(CommandHandler("check", check_cmd))
 
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
+    app.add_handler(CallbackQueryHandler(menu_callback, pattern="^(menu_|topics_|rename_select:|delete_select:|confirm_delete:)"))
     app.add_handler(CallbackQueryHandler(on_topic, pattern="^(t_|cancel)"))
+
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     app.add_error_handler(error_handler)
 
