@@ -6,10 +6,11 @@ import uuid
 import asyncio
 import threading
 from pathlib import Path
+from urllib.parse import urlencode
 
+import requests
 import yt_dlp
 from flask import Flask
-from playwright.async_api import async_playwright
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -130,8 +131,6 @@ def get_topic_id(name):
         "Telegram": 4,
         "X": 8,
         "Threads": 9,
-
-        # Новый топик Instagram
         "Instagram": 22
     }
 
@@ -232,7 +231,7 @@ def build_topic_keyboard():
 
 
 # =========================
-# VIDEO DOWNLOAD
+# VIDEO DOWNLOAD WITH YT-DLP
 # =========================
 
 def download_video_sync(url: str):
@@ -275,60 +274,48 @@ async def download_video(url: str):
 
 
 # =========================
-# SCREENSHOT
+# SCREENSHOT WITH MICROLINK
 # =========================
 
-async def make_mobile_screenshot(url: str):
+def make_microlink_screenshot_sync(url: str):
     screenshot_id = str(uuid.uuid4())
     screenshot_path = os.path.join(DOWNLOAD_DIR, f"{screenshot_id}.png")
 
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-gpu"
-            ]
-        )
+    params = {
+        "url": url,
+        "screenshot": "true",
+        "meta": "false",
+        "embed": "screenshot.url",
+        "viewport.width": "390",
+        "viewport.height": "844",
+        "deviceScaleFactor": "2",
+        "waitUntil": "networkidle0",
+        "timeout": "45000",
+        "type": "png"
+    }
 
-        context = await browser.new_context(
-            viewport={"width": 390, "height": 844},
-            device_scale_factor=2,
-            is_mobile=True,
-            has_touch=True,
-            user_agent=(
-                "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
-                "AppleWebKit/605.1.15 (KHTML, like Gecko) "
-                "Version/17.0 Mobile/15E148 Safari/604.1"
-            )
-        )
+    api_url = "https://api.microlink.io/?" + urlencode(params)
 
-        page = await context.new_page()
+    logger.info(f"Запрашиваю скрин через Microlink: {url}")
 
-        await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-        await page.wait_for_timeout(5000)
+    response = requests.get(api_url, timeout=90)
 
-        try:
-            await page.locator("text=Allow all cookies").click(timeout=3000)
-            await page.wait_for_timeout(1500)
-        except Exception:
-            pass
+    if response.status_code != 200:
+        raise Exception(f"Microlink HTTP error: {response.status_code} - {response.text[:300]}")
 
-        try:
-            await page.locator("text=Not now").click(timeout=3000)
-            await page.wait_for_timeout(1500)
-        except Exception:
-            pass
+    content_type = response.headers.get("content-type", "")
 
-        await page.screenshot(
-            path=screenshot_path,
-            full_page=False
-        )
+    if "image" not in content_type:
+        raise Exception(f"Microlink не вернул картинку. Content-Type: {content_type}. Body: {response.text[:300]}")
 
-        await browser.close()
+    with open(screenshot_path, "wb") as f:
+        f.write(response.content)
 
     return screenshot_path
+
+
+async def make_microlink_screenshot(url: str):
+    return await asyncio.to_thread(make_microlink_screenshot_sync, url)
 
 
 # =========================
@@ -366,8 +353,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def process_content(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
-    # ВАЖНО:
-    # Если пользователь отправил текст без ссылки — бот ничего не отвечает.
+    # Если пользователь отправил текст без ссылки — бот молчит
     if not has_link(text):
         return
 
@@ -437,7 +423,7 @@ async def on_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"🎬 {platform}"
             )
 
-            media_path = await make_mobile_screenshot(url)
+            media_path = await make_microlink_screenshot(url)
 
             with open(media_path, "rb") as photo_file:
                 if topic_id is not None:
