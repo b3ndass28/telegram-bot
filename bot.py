@@ -6,11 +6,10 @@ import uuid
 import asyncio
 import threading
 from pathlib import Path
-from urllib.parse import urlencode
 
-import requests
 import yt_dlp
 from flask import Flask
+from playwright.async_api import async_playwright
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -58,7 +57,6 @@ logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# Твой Telegram supergroup/forum chat ID
 CHAT_ID = -1003794802790
 
 TOPICS = [
@@ -90,7 +88,6 @@ def load_pending():
         except Exception as e:
             logger.error(f"Ошибка чтения pending.json: {e}")
             return {}
-
     return {}
 
 
@@ -133,7 +130,6 @@ def get_topic_id(name):
         "Threads": 9,
         "Instagram": 22
     }
-
     return mapping.get(name)
 
 
@@ -231,6 +227,60 @@ def build_topic_keyboard():
 
 
 # =========================
+# COOKIES FOR PLAYWRIGHT
+# =========================
+
+def load_netscape_cookies_for_playwright(cookie_file: str):
+    cookies = []
+
+    if not os.path.exists(cookie_file):
+        logger.warning("cookies.txt не найден для Playwright.")
+        return cookies
+
+    try:
+        with open(cookie_file, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+
+        for line in lines:
+            line = line.strip()
+
+            if not line or line.startswith("#"):
+                continue
+
+            parts = line.split("\t")
+
+            if len(parts) < 7:
+                continue
+
+            domain, flag, path, secure, expiration, name, value = parts[:7]
+
+            try:
+                expires = int(expiration)
+            except Exception:
+                expires = -1
+
+            cookie = {
+                "name": name,
+                "value": value,
+                "domain": domain,
+                "path": path,
+                "expires": expires,
+                "httpOnly": False,
+                "secure": secure.upper() == "TRUE",
+                "sameSite": "Lax"
+            }
+
+            cookies.append(cookie)
+
+        logger.info(f"Загружено cookies для Playwright: {len(cookies)}")
+        return cookies
+
+    except Exception as e:
+        logger.error(f"Ошибка чтения cookies.txt для Playwright: {e}")
+        return []
+
+
+# =========================
 # VIDEO DOWNLOAD WITH YT-DLP
 # =========================
 
@@ -274,48 +324,74 @@ async def download_video(url: str):
 
 
 # =========================
-# SCREENSHOT WITH MICROLINK
+# SCREENSHOT WITH PLAYWRIGHT
 # =========================
 
-def make_microlink_screenshot_sync(url: str):
+async def make_instagram_profile_screenshot(url: str):
     screenshot_id = str(uuid.uuid4())
     screenshot_path = os.path.join(DOWNLOAD_DIR, f"{screenshot_id}.png")
 
-    params = {
-        "url": url,
-        "screenshot": "true",
-        "meta": "false",
-        "embed": "screenshot.url",
-        "viewport.width": "390",
-        "viewport.height": "844",
-        "deviceScaleFactor": "2",
-        "waitUntil": "networkidle0",
-        "timeout": "45000",
-        "type": "png"
-    }
+    cookies = load_netscape_cookies_for_playwright(COOKIES_FILE)
 
-    api_url = "https://api.microlink.io/?" + urlencode(params)
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(
+            headless=True,
+            args=[
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu"
+            ]
+        )
 
-    logger.info(f"Запрашиваю скрин через Microlink: {url}")
+        context = await browser.new_context(
+            viewport={"width": 390, "height": 844},
+            device_scale_factor=2,
+            is_mobile=True,
+            has_touch=True,
+            user_agent=(
+                "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+                "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+                "Version/17.0 Mobile/15E148 Safari/604.1"
+            )
+        )
 
-    response = requests.get(api_url, timeout=90)
+        if cookies:
+            await context.add_cookies(cookies)
+            logger.info("Cookies добавлены в Playwright context.")
+        else:
+            logger.warning("Cookies не добавлены в Playwright context.")
 
-    if response.status_code != 200:
-        raise Exception(f"Microlink HTTP error: {response.status_code} - {response.text[:300]}")
+        page = await context.new_page()
 
-    content_type = response.headers.get("content-type", "")
+        await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        await page.wait_for_timeout(7000)
 
-    if "image" not in content_type:
-        raise Exception(f"Microlink не вернул картинку. Content-Type: {content_type}. Body: {response.text[:300]}")
+        popup_texts = [
+            "Not now",
+            "Not Now",
+            "Allow all cookies",
+            "Accept all",
+            "Accept",
+            "Maybe later"
+        ]
 
-    with open(screenshot_path, "wb") as f:
-        f.write(response.content)
+        for text in popup_texts:
+            try:
+                await page.get_by_text(text, exact=False).click(timeout=2000)
+                await page.wait_for_timeout(1000)
+            except Exception:
+                pass
+
+        await page.wait_for_timeout(3000)
+
+        await page.screenshot(
+            path=screenshot_path,
+            full_page=False
+        )
+
+        await browser.close()
 
     return screenshot_path
-
-
-async def make_microlink_screenshot(url: str):
-    return await asyncio.to_thread(make_microlink_screenshot_sync, url)
 
 
 # =========================
@@ -353,7 +429,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def process_content(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
-    # Если пользователь отправил текст без ссылки — бот молчит
     if not has_link(text):
         return
 
@@ -423,7 +498,7 @@ async def on_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"🎬 {platform}"
             )
 
-            media_path = await make_microlink_screenshot(url)
+            media_path = await make_instagram_profile_screenshot(url)
 
             with open(media_path, "rb") as photo_file:
                 if topic_id is not None:
@@ -555,7 +630,8 @@ async def check_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Cookies file: {'✅ найден' if cookies_exists else '❌ не найден'}\n"
         f"Cookies path: {os.path.abspath(COOKIES_FILE)}\n"
         f"Pending file: {os.path.abspath(PENDING_FILE)}\n"
-        f"Download dir: {os.path.abspath(DOWNLOAD_DIR)}"
+        f"Download dir: {os.path.abspath(DOWNLOAD_DIR)}\n"
+        f"Docker mode: ✅ Playwright enabled"
     )
 
 
