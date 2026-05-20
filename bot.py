@@ -1071,9 +1071,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
 
     if context.application.bot_data.get(f"processing_{user_id}") and has_link(text):
-        await update.message.reply_text(
-            "⏳ Пожалуйста, подожди. Сейчас бот уже обрабатывает предыдущий референс."
+        old_queue = context.application.bot_data.get(f"queued_{user_id}")
+
+        if old_queue:
+            try:
+                await context.bot.delete_message(
+                    chat_id=old_queue.get("chat_id"),
+                    message_id=old_queue.get("message_id")
+                )
+            except Exception:
+                pass
+
+        wait_message = await update.message.reply_text(
+            "⏳ Пожалуйста, подожди. Сейчас бот уже обрабатывает предыдущий референс.\n\n"
+            "Когда процесс закончится, я автоматически открою выбор топика для этой ссылки."
         )
+
+        context.application.bot_data[f"queued_{user_id}"] = {
+            "content": text,
+            "chat_id": update.effective_chat.id,
+            "message_id": wait_message.message_id
+        }
         return
 
     if text == "📂 Topics":
@@ -1244,12 +1262,12 @@ async def handle_rename_topic_text(update: Update, context: ContextTypes.DEFAULT
     )
 
 
-async def process_content(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
-    if not has_link(text):
-        return
 
-    user_id = update.effective_user.id
-
+async def ask_topic_prompt_for_content(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int, text: str):
+    """
+    Sends the "choose topic" prompt for a link.
+    Used both for normal messages and queued messages after a previous process finishes.
+    """
     context.user_data["content"] = text
     set_pending_content(user_id, text)
 
@@ -1257,33 +1275,38 @@ async def process_content(update: Update, context: ContextTypes.DEFAULT_TYPE, te
 
     if url and is_social_profile(url):
         platform = detect_platform(url)
-
-        if safe_file_exists(TOPICS_IMAGE):
-            with open(TOPICS_IMAGE, "rb") as photo:
-                await update.message.reply_photo(
-                    photo=photo,
-                    caption=f"📸 {platform}\n\n📌 Куда сохранить профиль?",
-                    reply_markup=build_topic_keyboard()
-                )
-        else:
-            await update.message.reply_text(
-                f"📸 {platform}\n\n📌 Куда сохранить профиль?",
-                reply_markup=build_topic_keyboard()
-            )
-        return
+        caption = f"📸 {platform}\n\n📌 Куда сохранить профиль?"
+    else:
+        caption = "📌 Куда сохранить?"
 
     if safe_file_exists(TOPICS_IMAGE):
         with open(TOPICS_IMAGE, "rb") as photo:
-            await update.message.reply_photo(
+            await context.bot.send_photo(
+                chat_id=chat_id,
                 photo=photo,
-                caption="📌 Куда сохранить?",
+                caption=caption,
                 reply_markup=build_topic_keyboard()
             )
     else:
-        await update.message.reply_text(
-            "📌 Куда сохранить?",
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=caption,
             reply_markup=build_topic_keyboard()
         )
+
+
+async def process_content(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
+    if not has_link(text):
+        return
+
+    user_id = update.effective_user.id
+
+    await ask_topic_prompt_for_content(
+        context=context,
+        chat_id=update.effective_chat.id,
+        user_id=user_id,
+        text=text
+    )
 
 
 async def on_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1464,18 +1487,36 @@ async def save_selected_content(query, context: ContextTypes.DEFAULT_TYPE):
                 status_label
             )
 
-            with open(media_path, "rb") as video_file:
-                sent_message = await context.bot.send_video(
-                    chat_id=CHAT_ID,
-                    message_thread_id=topic_id,
-                    video=video_file,
-                    caption=caption_text,
-                    reply_markup=build_post_action_keyboard(item_id),
-                    supports_streaming=True,
-                    read_timeout=120,
-                    write_timeout=120,
-                    connect_timeout=120
+            try:
+                with open(media_path, "rb") as video_file:
+                    sent_message = await context.bot.send_video(
+                        chat_id=CHAT_ID,
+                        message_thread_id=topic_id,
+                        video=video_file,
+                        caption=caption_text,
+                        reply_markup=build_post_action_keyboard(item_id),
+                        supports_streaming=True,
+                        read_timeout=120,
+                        write_timeout=120,
+                        connect_timeout=120
+                    )
+            except Exception as video_send_error:
+                logger.error(
+                    f"send_video failed, trying send_document: "
+                    f"{type(video_send_error).__name__}: {repr(video_send_error)}"
                 )
+
+                with open(media_path, "rb") as doc_file:
+                    sent_message = await context.bot.send_document(
+                        chat_id=CHAT_ID,
+                        message_thread_id=topic_id,
+                        document=doc_file,
+                        caption=caption_text,
+                        reply_markup=build_post_action_keyboard(item_id),
+                        read_timeout=120,
+                        write_timeout=120,
+                        connect_timeout=120
+                    )
 
             success_caption = (
                 f"✅ Видео сохранено\n\n"
@@ -1565,7 +1606,7 @@ async def save_selected_content(query, context: ContextTypes.DEFAULT_TYPE):
                     f"📌 Status: {status_label}\n\n"
                     f"🔗 Link:\n{url}\n\n"
                     f"💭 Notes:\n{thought}\n\n"
-                    f"⚠️ Медиа не удалось обработать автоматически."
+                    f"⚠️ Медиа не удалось обработать автоматически. Сохраняю как ссылку."
                 )
 
                 sent_message = await context.bot.send_message(
@@ -1629,6 +1670,30 @@ async def save_selected_content(query, context: ContextTypes.DEFAULT_TYPE):
                 os.remove(media_path)
             except Exception:
                 pass
+
+        queued = context.application.bot_data.pop(f"queued_{user_id}", None)
+
+        if queued:
+            try:
+                await context.bot.delete_message(
+                    chat_id=queued.get("chat_id"),
+                    message_id=queued.get("message_id")
+                )
+            except Exception:
+                pass
+
+            try:
+                await ask_topic_prompt_for_content(
+                    context=context,
+                    chat_id=queued.get("chat_id"),
+                    user_id=user_id,
+                    text=queued.get("content")
+                )
+            except Exception as queue_error:
+                logger.error(
+                    f"Не удалось открыть выбор топика для queued ссылки: "
+                    f"{type(queue_error).__name__}: {repr(queue_error)}"
+                )
 
 
 # =========================

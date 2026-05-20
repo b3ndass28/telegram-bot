@@ -750,41 +750,89 @@ def load_netscape_cookies_for_playwright(cookie_file: str):
         return []
 
 
+def select_best_downloaded_media(video_id: str):
+    """
+    yt-dlp can download several files for X/Threads/Twitter posts.
+    This chooses the best usable video file instead of assuming there is only one.
+    """
+    files = [
+        p for p in DOWNLOAD_DIR.glob(f"{video_id}.*")
+        if p.is_file() and p.stat().st_size > 0
+    ]
+
+    if not files:
+        return None
+
+    video_ext_priority = {
+        ".mp4": 1,
+        ".mov": 2,
+        ".m4v": 3,
+        ".webm": 4,
+        ".mkv": 5,
+    }
+
+    video_files = [
+        p for p in files
+        if p.suffix.lower() in video_ext_priority
+    ]
+
+    if video_files:
+        # Prefer mp4/mov first, then bigger file size.
+        video_files.sort(
+            key=lambda p: (
+                video_ext_priority.get(p.suffix.lower(), 99),
+                -p.stat().st_size
+            )
+        )
+        return str(video_files[0])
+
+    # If there is no obvious video file, return the biggest file as last resort.
+    files.sort(key=lambda p: -p.stat().st_size)
+    return str(files[0])
+
+
 def download_video_sync(url: str):
     video_id = str(uuid.uuid4())
     output_template = str(DOWNLOAD_DIR / f"{video_id}.%(ext)s")
 
     ydl_opts = {
         "outtmpl": output_template,
-        "format": "best[height<=1080][ext=mp4]/best[height<=720][ext=mp4]/best[ext=mp4]/best",
+
+        # Safer universal format for Instagram/TikTok/X/Threads.
+        # We prefer normal MP4/H.264 up to 720p because Telegram handles it more reliably.
+        "format": (
+            "best[vcodec^=avc1][height<=720][ext=mp4]/"
+            "best[vcodec^=h264][height<=720][ext=mp4]/"
+            "best[height<=720][ext=mp4]/"
+            "best[ext=mp4]/"
+            "best"
+        ),
+        "format_sort": ["vcodec:h264", "ext:mp4", "res:720", "fps"],
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
+        "noprogress": True,
         "max_filesize": 48 * 1024 * 1024,
         "merge_output_format": "mp4",
-        "socket_timeout": 20,
-        "retries": 2,
-        "fragment_retries": 2,
-        "concurrent_fragment_downloads": 4,
+        "socket_timeout": 25,
+        "retries": 3,
+        "fragment_retries": 3,
+        "concurrent_fragment_downloads": 2,
     }
 
     if Path(COOKIES_FILE).exists():
         logger.info("cookies.txt найден. Использую cookies для yt-dlp.")
         ydl_opts["cookiefile"] = str(COOKIES_FILE)
     else:
-        logger.warning("cookies.txt не найден. Instagram может не скачаться.")
+        logger.warning("cookies.txt не найден. Некоторые платформы могут не скачаться.")
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        downloaded_path = ydl.prepare_filename(info)
+        ydl.extract_info(url, download=True)
 
-    if not os.path.exists(downloaded_path):
-        possible_files = list(DOWNLOAD_DIR.glob(f"{video_id}.*"))
+    downloaded_path = select_best_downloaded_media(video_id)
 
-        if possible_files:
-            downloaded_path = str(possible_files[0])
-        else:
-            raise FileNotFoundError("Видео не было скачано.")
+    if not downloaded_path or not os.path.exists(downloaded_path):
+        raise FileNotFoundError("Видео не было скачано или подходящий файл не найден.")
 
     return downloaded_path
 
