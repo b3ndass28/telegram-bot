@@ -148,6 +148,8 @@ INFO_LONG_TEXT = (
     "❌ Not Suitable — не подходит\n\n"
     "🔔 Напоминания\n"
     "Можно поставить reminder от 1 до 15 дней или тест на 1 минуту.\n\n"
+    "🧵 Threads\n"
+    "Threads-посты сейчас сохраняются как ссылка + notes, без попытки скачать видео. Threads-профили можно сохранять скриншотом.\n\n"
     "📤 Export\n"
     "Базу идей можно выгрузить в JSON или CSV.\n\n"
     "Пример:\n"
@@ -391,6 +393,24 @@ def build_back_cancel_keyboard():
 
 
 # =========================
+# FALLBACK HELPERS
+# =========================
+
+def should_screenshot_post_fallback(platform: str) -> bool:
+    return platform in {
+        "X Post",
+        "Instagram Post",
+    }
+
+
+def is_threads_download_disabled(platform: str) -> bool:
+    return platform in {
+        "Threads Post",
+        "Threads",
+    }
+
+
+# =========================
 # POST UPDATE
 # =========================
 
@@ -417,6 +437,23 @@ async def update_post_message(query, item):
             )
         except Exception as e:
             logger.error(f"Не удалось обновить пост: {type(e).__name__}: {repr(e)}")
+
+
+async def start_save_background_task(query, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Starts long save/download/screenshot work in the background.
+    This keeps the bot responsive, so new links can immediately get the "please wait" message.
+    """
+    user_id = query.from_user.id
+
+    if context.application.bot_data.get(f"processing_{user_id}"):
+        await query.message.reply_text(
+            "⏳ Пожалуйста, подожди. Сейчас бот уже обрабатывает предыдущий референс."
+        )
+        return
+
+    context.application.bot_data[f"processing_{user_id}"] = True
+    context.application.create_task(save_selected_content(query, context))
 
 
 # =========================
@@ -921,7 +958,7 @@ async def save_priority_callback(update: Update, context: ContextTypes.DEFAULT_T
 
     context.user_data["selected_priority"] = priority_key
 
-    await save_selected_content(query, context)
+    await start_save_background_task(query, context)
 
 
 async def post_action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1351,7 +1388,7 @@ async def on_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
         url = normalize_threads_url(url)
 
     if url and is_social_profile(url):
-        await save_selected_content(query, context)
+        await start_save_background_task(query, context)
         return
 
     topic_icon = get_topic_icon(topic)
@@ -1375,12 +1412,8 @@ async def on_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def save_selected_content(query, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
 
-    if context.application.bot_data.get(f"processing_{user_id}"):
-        await query.message.reply_text(
-            "⏳ Пожалуйста, подожди. Сейчас бот уже обрабатывает предыдущий референс."
-        )
-        return
-
+    # This function runs in background. The processing flag is set before the task starts,
+    # but we set it here too as a safety net.
     context.application.bot_data[f"processing_{user_id}"] = True
 
     content = context.user_data.get("content") or get_pending_content(user_id)
@@ -1470,6 +1503,63 @@ async def save_selected_content(query, context: ContextTypes.DEFAULT_TYPE):
                 "notes": thought,
                 "chat_id": CHAT_ID,
                 "message_id": sent_message.message_id if sent_message else None
+            }
+
+            add_database_item(db_item)
+
+        elif is_threads_download_disabled(platform):
+            priority_label = PRIORITIES.get(priority_key, PRIORITIES["normal"])["label"]
+            status_key = "new"
+            status_label = STATUSES[status_key]
+
+            caption_text = (
+                f"🧵 {platform}\n\n"
+                f"⚡ Priority: {priority_label}\n"
+                f"📌 Status: {status_label}\n\n"
+                f"🔗 Link:\n{url}\n\n"
+                f"💭 Notes:\n{thought}\n\n"
+                f"⚠️ Threads video download is currently disabled. Saved as link."
+            )
+
+            sent_message = await context.bot.send_message(
+                chat_id=CHAT_ID,
+                message_thread_id=topic_id,
+                text=caption_text,
+                reply_markup=build_post_action_keyboard(item_id)
+            )
+
+            success_caption = (
+                f"✅ Threads пост сохранён как ссылка\n\n"
+                f"{topic_icon} {topic}\n"
+                f"⚡ Priority: {priority_label}\n"
+                f"🎬 {platform}"
+            )
+
+            try:
+                await query.edit_message_caption(caption=success_caption)
+            except Exception:
+                await query.edit_message_text(success_caption)
+
+            db_item = {
+                "id": item_id,
+                "created_at": current_timestamp(),
+                "updated_at": current_timestamp(),
+                "type": "threads_link_reference",
+                "topic": topic,
+                "topic_id": topic_id,
+                "topic_icon": topic_icon,
+                "platform": platform,
+                "url": url,
+                "notes": thought,
+                "priority": priority_key,
+                "priority_label": priority_label,
+                "status": status_key,
+                "status_label": status_label,
+                "reminder": None,
+                "reminder_label": None,
+                "chat_id": CHAT_ID,
+                "message_id": sent_message.message_id if sent_message else None,
+                "download_disabled": True
             }
 
             add_database_item(db_item)
@@ -1614,50 +1704,164 @@ async def save_selected_content(query, context: ContextTypes.DEFAULT_TYPE):
                 status_key = "new"
                 status_label = STATUSES[status_key]
 
-                fallback_text = (
-                    f"🎬 {platform}\n\n"
-                    f"⚡ Priority: {priority_label}\n"
-                    f"📌 Status: {status_label}\n\n"
-                    f"🔗 Link:\n{url}\n\n"
-                    f"💭 Notes:\n{thought}\n\n"
-                    f"⚠️ Медиа не удалось обработать автоматически. Сохраняю как ссылку."
+                caption_text = build_video_caption(
+                    platform,
+                    url,
+                    thought,
+                    priority_label,
+                    status_label
                 )
 
-                sent_message = await context.bot.send_message(
-                    chat_id=CHAT_ID,
-                    message_thread_id=topic_id,
-                    text=fallback_text,
-                    reply_markup=build_post_action_keyboard(item_id)
-                )
+                # X/Threads/Instagram photo posts may fail through yt-dlp.
+                # In that case, save a screenshot of the post instead of only text.
+                if should_screenshot_post_fallback(platform):
+                    try:
+                        screenshot_path = await make_profile_screenshot(url)
 
-                db_item = {
-                    "id": item_id,
-                    "created_at": current_timestamp(),
-                    "updated_at": current_timestamp(),
-                    "type": "video_reference",
-                    "topic": topic,
-                    "topic_id": topic_id,
-                    "topic_icon": topic_icon,
-                    "platform": platform,
-                    "url": url,
-                    "notes": thought,
-                    "priority": priority_key,
-                    "priority_label": priority_label,
-                    "status": status_key,
-                    "status_label": status_label,
-                    "reminder": None,
-                    "reminder_label": None,
-                    "chat_id": CHAT_ID,
-                    "message_id": sent_message.message_id if sent_message else None,
-                    "media_failed": True
-                }
+                        with open(screenshot_path, "rb") as photo_file:
+                            sent_message = await context.bot.send_photo(
+                                chat_id=CHAT_ID,
+                                message_thread_id=topic_id,
+                                photo=photo_file,
+                                caption=caption_text,
+                                reply_markup=build_post_action_keyboard(item_id),
+                                read_timeout=120,
+                                write_timeout=120,
+                                connect_timeout=120
+                            )
 
-                fail_caption = (
-                    f"⚠️ Видео не обработалось, но пост сохранён текстом.\n\n"
-                    f"{topic_icon} {topic}\n"
-                    f"⚡ Priority: {priority_label}\n"
-                    f"🎬 {platform}"
-                )
+                        try:
+                            if screenshot_path and os.path.exists(screenshot_path):
+                                os.remove(screenshot_path)
+                        except Exception:
+                            pass
+
+                        db_item = {
+                            "id": item_id,
+                            "created_at": current_timestamp(),
+                            "updated_at": current_timestamp(),
+                            "type": "post_screenshot_reference",
+                            "topic": topic,
+                            "topic_id": topic_id,
+                            "topic_icon": topic_icon,
+                            "platform": platform,
+                            "url": url,
+                            "notes": thought,
+                            "priority": priority_key,
+                            "priority_label": priority_label,
+                            "status": status_key,
+                            "status_label": status_label,
+                            "reminder": None,
+                            "reminder_label": None,
+                            "chat_id": CHAT_ID,
+                            "message_id": sent_message.message_id if sent_message else None,
+                            "video_failed_screenshot_saved": True
+                        }
+
+                        fail_caption = (
+                            f"⚠️ Видео не скачалось, но скриншот поста сохранён.\n\n"
+                            f"{topic_icon} {topic}\n"
+                            f"⚡ Priority: {priority_label}\n"
+                            f"🎬 {platform}"
+                        )
+
+                    except Exception as screenshot_error:
+                        logger.error(
+                            f"Post screenshot fallback failed: "
+                            f"{type(screenshot_error).__name__}: {repr(screenshot_error)}"
+                        )
+
+                        fallback_text = (
+                            f"🎬 {platform}\n\n"
+                            f"⚡ Priority: {priority_label}\n"
+                            f"📌 Status: {status_label}\n\n"
+                            f"🔗 Link:\n{url}\n\n"
+                            f"💭 Notes:\n{thought}\n\n"
+                            f"⚠️ Медиа и скриншот не удалось обработать автоматически. Сохраняю как ссылку."
+                        )
+
+                        sent_message = await context.bot.send_message(
+                            chat_id=CHAT_ID,
+                            message_thread_id=topic_id,
+                            text=fallback_text,
+                            reply_markup=build_post_action_keyboard(item_id)
+                        )
+
+                        db_item = {
+                            "id": item_id,
+                            "created_at": current_timestamp(),
+                            "updated_at": current_timestamp(),
+                            "type": "video_reference",
+                            "topic": topic,
+                            "topic_id": topic_id,
+                            "topic_icon": topic_icon,
+                            "platform": platform,
+                            "url": url,
+                            "notes": thought,
+                            "priority": priority_key,
+                            "priority_label": priority_label,
+                            "status": status_key,
+                            "status_label": status_label,
+                            "reminder": None,
+                            "reminder_label": None,
+                            "chat_id": CHAT_ID,
+                            "message_id": sent_message.message_id if sent_message else None,
+                            "media_failed": True,
+                            "screenshot_failed": True
+                        }
+
+                        fail_caption = (
+                            f"⚠️ Видео и скриншот не обработались, но пост сохранён текстом.\n\n"
+                            f"{topic_icon} {topic}\n"
+                            f"⚡ Priority: {priority_label}\n"
+                            f"🎬 {platform}"
+                        )
+
+                else:
+                    fallback_text = (
+                        f"🎬 {platform}\n\n"
+                        f"⚡ Priority: {priority_label}\n"
+                        f"📌 Status: {status_label}\n\n"
+                        f"🔗 Link:\n{url}\n\n"
+                        f"💭 Notes:\n{thought}\n\n"
+                        f"⚠️ Медиа не удалось обработать автоматически. Сохраняю как ссылку."
+                    )
+
+                    sent_message = await context.bot.send_message(
+                        chat_id=CHAT_ID,
+                        message_thread_id=topic_id,
+                        text=fallback_text,
+                        reply_markup=build_post_action_keyboard(item_id)
+                    )
+
+                    db_item = {
+                        "id": item_id,
+                        "created_at": current_timestamp(),
+                        "updated_at": current_timestamp(),
+                        "type": "video_reference",
+                        "topic": topic,
+                        "topic_id": topic_id,
+                        "topic_icon": topic_icon,
+                        "platform": platform,
+                        "url": url,
+                        "notes": thought,
+                        "priority": priority_key,
+                        "priority_label": priority_label,
+                        "status": status_key,
+                        "status_label": status_label,
+                        "reminder": None,
+                        "reminder_label": None,
+                        "chat_id": CHAT_ID,
+                        "message_id": sent_message.message_id if sent_message else None,
+                        "media_failed": True
+                    }
+
+                    fail_caption = (
+                        f"⚠️ Видео не обработалось, но пост сохранён текстом.\n\n"
+                        f"{topic_icon} {topic}\n"
+                        f"⚡ Priority: {priority_label}\n"
+                        f"🎬 {platform}"
+                    )
 
             add_database_item(db_item)
 
