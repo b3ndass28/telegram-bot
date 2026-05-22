@@ -321,6 +321,42 @@ async def save_selected_content(q, context, link_only=False):
 
 
 
+
+async def safe_edit_message(query, text, reply_markup=None, parse_mode=None):
+    """
+    Safe Telegram message editor.
+    Edits the current message when possible; if Telegram refuses, sends a new message.
+    """
+    try:
+        if query.message and query.message.text is not None:
+            await query.edit_message_text(
+                text=text,
+                reply_markup=reply_markup,
+                parse_mode=parse_mode
+            )
+        elif query.message and query.message.caption is not None:
+            await query.edit_message_caption(
+                caption=text,
+                reply_markup=reply_markup,
+                parse_mode=parse_mode
+            )
+        else:
+            await query.message.reply_text(
+                text,
+                reply_markup=reply_markup,
+                parse_mode=parse_mode
+            )
+    except Exception:
+        try:
+            await query.message.reply_text(
+                text,
+                reply_markup=reply_markup,
+                parse_mode=parse_mode
+            )
+        except Exception:
+            pass
+
+
 # =========================
 # MODULAR FEATURE WRAPPERS
 # =========================
