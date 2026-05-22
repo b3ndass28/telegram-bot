@@ -303,6 +303,56 @@ async def save_selected_content(q, context, link_only=False):
             except Exception: pass
             await ask_topic_prompt(context, queued['chat_id'], uid, queued['content'])
 
+
+
+# =========================
+# MODULAR FEATURE WRAPPERS
+# =========================
+
+async def backup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    return await backup_cmd_mod(update, context, require_owner)
+
+
+async def restore_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    return await restore_cmd_mod(update, context, require_owner)
+
+
+async def connectbackup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    return await connectbackup_cmd_mod(update, context, require_owner)
+
+
+async def autobackup_on_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    return await autobackup_on_cmd_mod(update, context, require_owner)
+
+
+async def autobackup_off_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    return await autobackup_off_cmd_mod(update, context, require_owner)
+
+
+async def broadcast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    return await broadcast_cmd_mod(update, context, require_owner)
+
+
+async def social_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_access(update, context):
+        return
+    return await social_cmd_mod(update, context)
+
+
+async def backup_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    return await backup_callback_mod(update, context, require_owner, safe_edit_message)
+
+
+async def social_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_access(update, context):
+        return
+    return await social_callback_mod(update, context, safe_edit_message)
+
+
+async def restore_document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    return await handle_restore_document(update, context, require_owner)
+
+
 async def error_handler(update, context): logger.error(f'Update {update} caused error: {type(context.error).__name__}: {repr(context.error)}')
 async def post_init(app):
     ensure_owner(OWNER_ID)
