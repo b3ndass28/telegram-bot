@@ -10,9 +10,16 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile
 from telegram.ext import ContextTypes
 
 from config import ANALYTICS_FILE
-from helpers import current_timestamp, safe_edit_message, DOWNLOAD_DIR
+from datetime import datetime
+from config import DOWNLOAD_DIR
 from social_cards import create_social_card, k_format, platform_label
 from pdf_reports import create_social_pdf
+
+
+def current_timestamp():
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
 
 
 def _load():
