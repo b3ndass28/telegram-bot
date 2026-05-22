@@ -4,6 +4,18 @@ from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, InputFile
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, ContextTypes, filters
 from config import BOT_TOKEN, OWNER_ID, TOPICS_IMAGE, INFO_IMAGE, EXPORT_IMAGE, COOKIES_FILE, SETTINGS_FILE, DATABASE_FILE, REMINDERS_FILE, PRIORITIES, STATUSES
+from backup_manager import (
+    backup_cmd as backup_cmd_mod,
+    restore_cmd as restore_cmd_mod,
+    connectbackup_cmd as connectbackup_cmd_mod,
+    autobackup_on_cmd as autobackup_on_cmd_mod,
+    autobackup_off_cmd as autobackup_off_cmd_mod,
+    handle_restore_document,
+    backup_callback as backup_callback_mod,
+    autobackup_job,
+)
+from broadcast_manager import broadcast_cmd as broadcast_cmd_mod, handle_broadcast_text
+from social_manager import social_cmd as social_cmd_mod, social_callback as social_callback_mod, handle_social_text_mode
 from helpers import *
 
 web_app = Flask(__name__)
@@ -33,9 +45,9 @@ async def require_owner(update, context):
     return False
 
 def reply_panel():
-    return ReplyKeyboardMarkup([[KeyboardButton('📂 Topics'),KeyboardButton('⚙️ Setup'),KeyboardButton('ℹ️ Info')],[KeyboardButton('📤 Export'),KeyboardButton('✅ Check')]], resize_keyboard=True, one_time_keyboard=False, is_persistent=True)
+    return ReplyKeyboardMarkup([[KeyboardButton('📂 Topics'),KeyboardButton('📊 Соцсети'),KeyboardButton('⚙️ Setup')],[KeyboardButton('ℹ️ Info'),KeyboardButton('💾 Backup')]], resize_keyboard=True, one_time_keyboard=False, is_persistent=True)
 def main_kb(uid):
-    rows=[[InlineKeyboardButton('📂 Topics',callback_data='menu_topics'),InlineKeyboardButton('⚙️ Setup',callback_data='menu_setup')],[InlineKeyboardButton('ℹ️ Info',callback_data='menu_info'),InlineKeyboardButton('📤 Export',callback_data='menu_export')],[InlineKeyboardButton('✅ Check',callback_data='menu_check'),InlineKeyboardButton('❌ Close',callback_data='menu_close')]]
+    rows=[[InlineKeyboardButton('📂 Topics',callback_data='menu_topics'),InlineKeyboardButton('📊 Соцсети',callback_data='social_main')],[InlineKeyboardButton('⚙️ Setup',callback_data='menu_setup'),InlineKeyboardButton('ℹ️ Info',callback_data='menu_info')],[InlineKeyboardButton('💾 Backup',callback_data='backup_menu'),InlineKeyboardButton('✅ Check',callback_data='menu_check')],[InlineKeyboardButton('❌ Close',callback_data='menu_close')]]
     if is_owner(uid): rows.insert(0,[InlineKeyboardButton('👑 Owner Panel',callback_data='owner_panel')])
     return InlineKeyboardMarkup(rows)
 def setup_kb(): return InlineKeyboardMarkup([[InlineKeyboardButton('🔗 Ввести Chat ID',callback_data='setup_set_chat')],[InlineKeyboardButton('📂 Topics',callback_data='menu_topics')],[InlineKeyboardButton('⬅️ Назад',callback_data='menu_main')]])
@@ -217,6 +229,10 @@ async def handle_message(update, context):
         msg=await update.message.reply_text('⏳ Пожалуйста, подожди. Когда процесс закончится, я открою выбор топика для этой ссылки.')
         context.application.bot_data[f'queued_{uid}']={'content':text,'chat_id':update.effective_chat.id,'message_id':msg.message_id}; return
     if text=='📂 Topics': await topics_cmd(update, context); return
+    if text=='📊 Соцсети': await social_cmd(update, context); return
+    if text=='💾 Backup': await backup_cmd(update, context); return
+    if await handle_broadcast_text(update, context, text, is_owner): return
+    if await handle_social_text_mode(update, context, text): return
     if text=='⚙️ Setup': await setup_cmd(update, context); return
     if text=='ℹ️ Info': await info_cmd(update, context); return
     if text=='📤 Export': await export_cmd(update, context); return
@@ -356,15 +372,19 @@ async def restore_document_handler(update: Update, context: ContextTypes.DEFAULT
 async def error_handler(update, context): logger.error(f'Update {update} caused error: {type(context.error).__name__}: {repr(context.error)}')
 async def post_init(app):
     ensure_owner(OWNER_ID)
-    await app.bot.set_my_commands([('start','Open bot'),('menu','Menu'),('setup','Setup'),('connectchat','Connect group'),('connecttopic','Connect topic'),('topics','Topics'),('check','Check'),('id','Get IDs'),('allow','Owner allow user'),('users','Owner users'),('reset','Reset')])
-    if app.job_queue: app.job_queue.run_repeating(reminders_job, interval=30, first=10, name='reminders_job')
+    await app.bot.set_my_commands([('start','Open bot'),('menu','Menu'),('setup','Setup'),('connectchat','Connect group'),('connecttopic','Connect topic'),('topics','Topics'),('check','Check'),('id','Get IDs'),('allow','Owner allow user'),('users','Owner users'),('reset','Reset'),('backup','Backup'),('restore','Restore'),('broadcast','Broadcast'),('social','Social')])
+    if app.job_queue:
+        app.job_queue.run_repeating(reminders_job, interval=30, first=10, name='reminders_job')
+        app.job_queue.run_repeating(autobackup_job, interval=300, first=60, name='autobackup_job')
 def main():
     if not BOT_TOKEN: raise ValueError('BOT_TOKEN не найден')
     if not OWNER_ID: raise ValueError('OWNER_ID не найден')
     threading.Thread(target=run_web_server, daemon=True).start()
     app=Application.builder().token(BOT_TOKEN).post_init(post_init).build()
-    for name,fn in [('start',start),('menu',menu_cmd),('panel',panel_cmd),('setup',setup_cmd),('connectchat',connectchat_cmd),('connecttopic',connecttopic_cmd),('allow',allow_cmd),('users',users_cmd),('topics',topics_cmd),('info',info_cmd),('export',export_cmd),('id',id_cmd),('check',check_cmd),('reset',reset_cmd)]: app.add_handler(CommandHandler(name,fn))
+    for name,fn in [('start',start),('menu',menu_cmd),('panel',panel_cmd),('setup',setup_cmd),('connectchat',connectchat_cmd),('connecttopic',connecttopic_cmd),('allow',allow_cmd),('users',users_cmd),('topics',topics_cmd),('info',info_cmd),('export',export_cmd),('id',id_cmd),('check',check_cmd),('reset',reset_cmd),('backup',backup_cmd),('restore',restore_cmd),('connectbackup',connectbackup_cmd),('autobackup_on',autobackup_on_cmd),('autobackup_off',autobackup_off_cmd),('broadcast',broadcast_cmd),('social',social_cmd)]: app.add_handler(CommandHandler(name,fn))
     app.add_handler(CallbackQueryHandler(menu_callback, pattern='^(menu_|setup_|owner_|topics_|rename_select:|delete_select:|confirm_delete:|export_)'))
+    app.add_handler(CallbackQueryHandler(backup_callback, pattern='^(backup_|restore_start|autobackup_)'))
+    app.add_handler(CallbackQueryHandler(social_callback, pattern='^social_'))
     app.add_handler(CallbackQueryHandler(save_priority_callback, pattern='^(save_priority_|save_link_only|cancel_save)'))
     app.add_handler(CallbackQueryHandler(post_action_callback, pattern='^post_'))
     app.add_handler(CallbackQueryHandler(on_topic, pattern='^(t_|save_link_only|cancel_save)'))
