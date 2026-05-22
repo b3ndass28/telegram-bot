@@ -15,30 +15,20 @@ def _load_settings():
 
 
 def _extract_allowed_users(settings):
-    """
-    Supports different settings.json structures used in previous bot versions.
-    Returns a dict/list-like collection of allowed Telegram user IDs.
-    """
     if not isinstance(settings, dict):
         return {}
 
-    # Most common structure:
-    # {"users": {"123": {...}, "456": {...}}}
     users = settings.get("users")
     if isinstance(users, dict):
         return users
 
-    # Alternative structures:
-    # {"allowed_users": {"123": {...}}}
     allowed = settings.get("allowed_users")
     if isinstance(allowed, dict):
         return allowed
 
-    # {"allowed_users": [123, 456]}
     if isinstance(allowed, list):
         return {str(uid): {} for uid in allowed}
 
-    # {"authorized_users": [123, 456]}
     authorized = settings.get("authorized_users")
     if isinstance(authorized, list):
         return {str(uid): {} for uid in authorized}
