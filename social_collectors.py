@@ -454,23 +454,138 @@ def find_tiktok_items(payload):
     return result
 
 
+
+def tiktok_find_userinfo(payload, username):
+    """
+    TikTok often stores profile stats under:
+    __DEFAULT_SCOPE__ -> webapp.user-detail -> userInfo -> {user, stats}
+    This function searches for that shape first, then falls back to recursive candidates.
+    """
+    username = username.lower().lstrip("@")
+
+    # Direct known path
+    try:
+        default_scope = payload.get("__DEFAULT_SCOPE__", {})
+        for key, value in default_scope.items():
+            if "user-detail" in key and isinstance(value, dict):
+                user_info = value.get("userInfo") or value.get("user_info")
+                if isinstance(user_info, dict):
+                    user = user_info.get("user", {})
+                    stats = user_info.get("stats", {}) or user_info.get("statsV2", {})
+                    uid = str(user.get("uniqueId") or user.get("unique_id") or "").lower()
+                    if stats and (uid == username or not username):
+                        return user, stats
+    except Exception:
+        pass
+
+    # Recursive fallback
+    candidates = deep_find_dicts(payload, ["userInfo", "user_info", "stats", "statsV2", "followerCount", "heartCount", "videoCount"])
+    for obj in candidates:
+        if not isinstance(obj, dict):
+            continue
+
+        user_info = obj.get("userInfo") or obj.get("user_info")
+        if isinstance(user_info, dict):
+            user = user_info.get("user", {})
+            stats = user_info.get("stats", {}) or user_info.get("statsV2", {})
+            uid = str(user.get("uniqueId") or user.get("unique_id") or "").lower()
+            if stats and (uid == username or not username):
+                return user, stats
+
+        stats = obj.get("stats") or obj.get("statsV2")
+        if isinstance(stats, dict):
+            uid = str(obj.get("uniqueId") or obj.get("unique_id") or obj.get("user", {}).get("uniqueId") or "").lower()
+            if any(k in stats for k in ("followerCount", "heartCount", "videoCount")) and (uid == username or not uid):
+                return obj.get("user", obj), stats
+
+        if any(k in obj for k in ("followerCount", "heartCount", "videoCount")):
+            return obj, obj
+
+    return None, None
+
+
+def tiktok_parse_meta_counts(html):
+    """
+    Last-resort parser for TikTok meta text like:
+    '237.7K Followers, 120 Following, 2.1M Likes...'
+    """
+    text = BeautifulSoup(html, "html.parser").get_text(" ", strip=True)
+    stats = {}
+
+    followers = extract_count_near(text, ["Followers", "followers"])
+    following = extract_count_near(text, ["Following", "following"])
+    likes = extract_count_near(text, ["Likes", "likes"])
+    videos = extract_count_near(text, ["Videos", "videos", "Posts", "posts"])
+
+    if followers is not None:
+        stats["followers"] = followers
+    if following is not None:
+        stats["following"] = following
+    if likes is not None:
+        stats["total_likes"] = likes
+    if videos is not None:
+        stats["total_posts"] = videos
+
+    return stats
+
+
+async def tiktok_profile_playwright(account):
+    username = account.get("username", "").lstrip("@")
+    text, html, links = await browser_snapshot(account.get("url") or platform_url("tiktok", username), "tiktok.com", wait_ms=6500)
+
+    stats = empty_stats(account)
+    stats["source"] = "tiktok:playwright_profile"
+    stats["note"] = ""
+
+    stats["followers"] = extract_count_near(text, ["Followers", "followers"])
+    stats["following"] = extract_count_near(text, ["Following", "following"])
+    stats["total_likes"] = extract_count_near(text, ["Likes", "likes"])
+    stats["total_posts"] = extract_count_near(text, ["Videos", "videos", "Posts", "posts"])
+
+    return finalize_stats(stats)
+
+
+
+
 def tiktok_profile(account):
     username = account.get("username", "").lstrip("@")
-    payload = tiktok_payload(account)
-    profile = find_tiktok_profile(payload, username)
     stats = empty_stats(account)
-    stats["source"] = "tiktok:hydration_profile"
-    stats["note"] = ""
-    if profile:
-        profile_stats = profile.get("stats") or profile.get("statsV2") or profile
-        stats.update({
-            "followers": parse_count(profile_stats.get("followerCount") or profile_stats.get("follower_count")),
-            "following": parse_count(profile_stats.get("followingCount") or profile_stats.get("following_count")),
-            "total_posts": parse_count(profile_stats.get("videoCount") or profile_stats.get("video_count")),
-            "total_likes": parse_count(profile_stats.get("heartCount") or profile_stats.get("heart") or profile_stats.get("diggCount")),
-            "profile_pic_url": profile.get("avatarLarger") or profile.get("avatarMedium") or profile.get("avatarThumb"),
-        })
-    return finalize_stats(stats)
+
+    try:
+        payload = tiktok_payload(account)
+        user, profile_stats = tiktok_find_userinfo(payload, username)
+
+        stats["source"] = "tiktok:hydration_profile"
+        stats["note"] = ""
+
+        if profile_stats:
+            stats.update({
+                "followers": parse_count(profile_stats.get("followerCount") or profile_stats.get("follower_count")),
+                "following": parse_count(profile_stats.get("followingCount") or profile_stats.get("following_count")),
+                "total_posts": parse_count(profile_stats.get("videoCount") or profile_stats.get("video_count")),
+                "total_likes": parse_count(profile_stats.get("heartCount") or profile_stats.get("heart") or profile_stats.get("diggCount")),
+                "profile_pic_url": (user or {}).get("avatarLarger") or (user or {}).get("avatarMedium") or (user or {}).get("avatarThumb"),
+            })
+            return finalize_stats(stats)
+
+        # If JSON exists but shape changed, try meta/body text fallback from the same page.
+        url = account.get("url") or platform_url("tiktok", username)
+        response = make_session().get(url, headers=dict(DEFAULT_HEADERS, Referer="https://www.tiktok.com/"), timeout=25)
+        meta_stats = tiktok_parse_meta_counts(response.text)
+        if meta_stats:
+            stats.update(meta_stats)
+            stats["source"] = "tiktok:meta_profile"
+            stats["note"] = ""
+            return finalize_stats(stats)
+
+        stats["source"] = "tiktok:hydration_profile"
+        stats["note"] = "TikTok page loaded, but profile counters were not found in hydration JSON."
+        return finalize_stats(stats)
+
+    except Exception as e:
+        stats["source"] = "tiktok:hydration_failed"
+        stats["note"] = f"TikTok hydration failed: {type(e).__name__}: {e}"
+        return finalize_stats(stats)
 
 
 def tiktok_recent(account, count=3):
@@ -533,7 +648,15 @@ async def collect_profile_stats(account):
         if platform == "instagram":
             return await instagram_profile(account)
         if platform == "tiktok":
-            return await asyncio.to_thread(tiktok_profile, account)
+            stats = await asyncio.to_thread(tiktok_profile, account)
+            if stats.get("status") == "ok":
+                return stats
+            # Browser fallback catches pages where requests gets an empty/changed hydration object.
+            fallback = await tiktok_profile_playwright(account)
+            if fallback.get("status") == "ok":
+                return fallback
+            fallback["note"] = (fallback.get("note") or "") + " | " + (stats.get("note") or "")
+            return fallback
         if platform == "x":
             return await x_profile(account)
         if platform == "threads":
