@@ -8,20 +8,16 @@ from telegram import InputFile, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
 from config import SETTINGS_FILE, DATABASE_FILE, REMINDERS_FILE, DOWNLOAD_DIR, BACKUP_SETTINGS_FILE
-try:
-    from config import ANALYTICS_FILE
-except Exception:
-    ANALYTICS_FILE = Path(__file__).resolve().parent / "analytics.json"
 
 
 def backup_keyboard():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("💾 Backup now", callback_data="backup_now")],
-        [InlineKeyboardButton("♻️ Restore", callback_data="restore_start")],
-        [InlineKeyboardButton("📦 Connect backup chat", callback_data="backup_connect_help")],
+        [InlineKeyboardButton("💾 Создать бэкап", callback_data="backup_now")],
+        [InlineKeyboardButton("♻️ Восстановить", callback_data="restore_start")],
+        [InlineKeyboardButton("📦 Подключить backup-чат", callback_data="backup_connect_help")],
         [
-            InlineKeyboardButton("🔁 Auto backup ON", callback_data="autobackup_on"),
-            InlineKeyboardButton("⏸ Auto backup OFF", callback_data="autobackup_off"),
+            InlineKeyboardButton("🔁 Автобэкап ON", callback_data="autobackup_on"),
+            InlineKeyboardButton("⏸ Автобэкап OFF", callback_data="autobackup_off"),
         ],
         [InlineKeyboardButton("⬅️ Назад", callback_data="menu_main")],
     ])
@@ -50,7 +46,6 @@ def create_backup_zip():
         ("settings.json", SETTINGS_FILE),
         ("database.json", DATABASE_FILE),
         ("reminders.json", REMINDERS_FILE),
-        ("analytics.json", ANALYTICS_FILE),
         ("backup_settings.json", BACKUP_SETTINGS_FILE),
     ]
 
@@ -70,7 +65,6 @@ def restore_from_backup_zip(zip_path):
         "settings.json": SETTINGS_FILE,
         "database.json": DATABASE_FILE,
         "reminders.json": REMINDERS_FILE,
-        "analytics.json": ANALYTICS_FILE,
         "backup_settings.json": BACKUP_SETTINGS_FILE,
     }
 
@@ -112,14 +106,14 @@ async def backup_cmd(update, context: ContextTypes.DEFAULT_TYPE, require_owner):
         return
     path = create_backup_zip()
     with open(path, "rb") as f:
-        await update.message.reply_document(document=InputFile(f, filename=Path(path).name), caption="💾 Backup готов.")
+        await update.message.reply_document(document=InputFile(f, filename=Path(path).name), caption="💾 Бэкап готов.")
 
 
 async def restore_cmd(update, context: ContextTypes.DEFAULT_TYPE, require_owner):
     if not await require_owner(update, context):
         return
     context.user_data["mode"] = "awaiting_restore_zip"
-    await update.message.reply_text("♻️ Restore\n\nОтправь backup .zip файлом. Он восстановит settings/database/reminders/analytics.")
+    await update.message.reply_text("♻️ Восстановление\n\nОтправь backup .zip файлом. Он восстановит settings/database/reminders.")
 
 
 async def connectbackup_cmd(update, context: ContextTypes.DEFAULT_TYPE, require_owner):
@@ -131,7 +125,7 @@ async def connectbackup_cmd(update, context: ContextTypes.DEFAULT_TYPE, require_
     save_backup_settings(settings)
 
     await update.message.reply_text(
-        f"✅ Backup chat подключён.\n\nChat ID: `{update.effective_chat.id}`",
+        f"✅ Backup-чат подключён.\n\nChat ID: `{update.effective_chat.id}`",
         parse_mode="Markdown",
     )
 
@@ -142,7 +136,7 @@ async def autobackup_on_cmd(update, context: ContextTypes.DEFAULT_TYPE, require_
     settings = load_backup_settings()
     settings["enabled"] = True
     save_backup_settings(settings)
-    await update.message.reply_text("✅ Auto backup включён.")
+    await update.message.reply_text("✅ Автобэкап включён.")
 
 
 async def autobackup_off_cmd(update, context: ContextTypes.DEFAULT_TYPE, require_owner):
@@ -151,7 +145,7 @@ async def autobackup_off_cmd(update, context: ContextTypes.DEFAULT_TYPE, require
     settings = load_backup_settings()
     settings["enabled"] = False
     save_backup_settings(settings)
-    await update.message.reply_text("⏸ Auto backup выключен.")
+    await update.message.reply_text("⏸ Автобэкап выключен.")
 
 
 async def handle_restore_document(update, context: ContextTypes.DEFAULT_TYPE, require_owner):
@@ -215,7 +209,7 @@ async def backup_callback(update, context: ContextTypes.DEFAULT_TYPE, require_ow
         settings = load_backup_settings()
         await safe_edit_message(
             query,
-            f"💾 Backup\n\nAuto backup: {'ON' if settings.get('enabled') else 'OFF'}\nBackup chat: {settings.get('chat_id')}",
+            f"💾 Бэкап\n\nАвтобэкап: {'ON' if settings.get('enabled') else 'OFF'}\nBackup-чат: {settings.get('chat_id')}",
             reply_markup=backup_keyboard(),
         )
         return
@@ -223,18 +217,18 @@ async def backup_callback(update, context: ContextTypes.DEFAULT_TYPE, require_ow
     if data == "backup_now":
         path = create_backup_zip()
         with open(path, "rb") as f:
-            await query.message.reply_document(document=InputFile(f, filename=Path(path).name), caption="💾 Backup готов.")
+            await query.message.reply_document(document=InputFile(f, filename=Path(path).name), caption="💾 Бэкап готов.")
         return
 
     if data == "restore_start":
         context.user_data["mode"] = "awaiting_restore_zip"
-        await safe_edit_message(query, "♻️ Restore\n\nОтправь backup .zip файлом.")
+        await safe_edit_message(query, "♻️ Восстановление\n\nОтправь backup .zip файлом.")
         return
 
     if data == "backup_connect_help":
         await safe_edit_message(
             query,
-            "📦 Connect backup chat\n\nСоздай приватный канал/чат для backup, добавь туда бота админом и напиши там:\n\n/connectbackup",
+            "📦 Подключить backup-чат\n\nСоздай приватный канал/чат для бэкапов, добавь туда бота админом и напиши там:\n\n/connectbackup",
             reply_markup=backup_keyboard(),
         )
         return
@@ -243,12 +237,12 @@ async def backup_callback(update, context: ContextTypes.DEFAULT_TYPE, require_ow
         settings = load_backup_settings()
         settings["enabled"] = True
         save_backup_settings(settings)
-        await safe_edit_message(query, "✅ Auto backup включён.", reply_markup=backup_keyboard())
+        await safe_edit_message(query, "✅ Автобэкап включён.", reply_markup=backup_keyboard())
         return
 
     if data == "autobackup_off":
         settings = load_backup_settings()
         settings["enabled"] = False
         save_backup_settings(settings)
-        await safe_edit_message(query, "⏸ Auto backup выключен.", reply_markup=backup_keyboard())
+        await safe_edit_message(query, "⏸ Автобэкап выключен.", reply_markup=backup_keyboard())
         return

@@ -3,7 +3,7 @@ from datetime import datetime
 from pathlib import Path
 import yt_dlp
 from playwright.async_api import async_playwright
-from config import SETTINGS_FILE, DATABASE_FILE, REMINDERS_FILE, DOWNLOAD_DIR, COOKIES_FILE
+from config import SETTINGS_FILE, DATABASE_FILE, REMINDERS_FILE, DOWNLOAD_DIR, COOKIES_FILE, REMINDER_ALERT_IMAGE
 
 logger = logging.getLogger(__name__)
 
@@ -125,34 +125,205 @@ def load_reminders():
 def save_reminders(d): save_json(REMINDERS_FILE, d)
 
 def add_reminder(item_id, user_id, due_ts, label):
-    d=load_reminders(); r={'id':str(uuid.uuid4()),'item_id':item_id,'user_id':int(user_id),'due_ts':due_ts,'label':label,'created_at':now(),'sent':False}; d.append(r); save_reminders(d); return r
+    remove_reminders(item_id)
+    d = load_reminders()
+    r = {
+        'id': str(uuid.uuid4()),
+        'item_id': item_id,
+        'user_id': int(user_id),
+        'due_ts': due_ts,
+        'label': label,
+        'created_at': now(),
+        'sent': False,
+        'cancelled': False,
+    }
+    d.append(r)
+    save_reminders(d)
+    return r
 
 def remove_reminders(item_id):
-    d=load_reminders(); changed=False
+    d = load_reminders()
+    changed = False
     for r in d:
-        if r.get('item_id')==item_id and not r.get('sent'):
-            r['sent']=True; r['cancelled']=True; r['cancelled_at']=now(); changed=True
-    if changed: save_reminders(d)
+        if r.get('item_id') == item_id and not r.get('sent') and not r.get('cancelled'):
+            r['sent'] = True
+            r['cancelled'] = True
+            r['cancelled_at'] = now()
+            changed = True
+    if changed:
+        save_reminders(d)
+
+def active_reminders(user_id=None):
+    d = load_reminders()
+    out = []
+    for r in d:
+        if r.get('sent') or r.get('cancelled'):
+            continue
+        if user_id is not None and str(r.get('user_id')) != str(user_id):
+            continue
+        item = find_item(r.get('item_id'))
+        if item:
+            out.append((r, item))
+    out.sort(key=lambda pair: pair[0].get('due_ts', 0))
+    return out
+
+def completed_reminders(user_id=None):
+    d = load_reminders()
+    out = []
+    for r in d:
+        if not r.get('sent'):
+            continue
+        if user_id is not None and str(r.get('user_id')) != str(user_id):
+            continue
+        item = find_item(r.get('item_id'))
+        if item:
+            out.append((r, item))
+    out.sort(key=lambda pair: pair[0].get('sent_at', ''), reverse=True)
+    return out
+
+def clear_completed_reminders(user_id=None):
+    d = load_reminders()
+    before = len(d)
+    kept = []
+    for r in d:
+        if r.get('sent') or r.get('cancelled'):
+            if user_id is None or str(r.get('user_id')) == str(user_id):
+                continue
+        kept.append(r)
+    save_reminders(kept)
+    return before - len(kept)
+
+def reminder_due_label(ts):
+    try:
+        return datetime.fromtimestamp(float(ts)).strftime('%d.%m.%Y %H:%M')
+    except Exception:
+        return 'неизвестно'
+
+def post_link(item):
+    chat = item.get('chat_id')
+    msg = item.get('message_id')
+    if not chat or not msg:
+        return None
+    s = str(chat)
+    if s.startswith('-100'):
+        return f"https://t.me/c/{s[4:]}/{msg}"
+    return None
 
 def reminder_text(item):
-    return f"🔔 Reminder\n\nПора вернуться к идее:\n\n🎬 {item.get('platform','')}\n⚡ Priority: {item.get('priority_label','')}\n📌 Status: {item.get('status_label','')}\n\n🔗 Link:\n{item.get('url','')}\n\n💭 Notes:\n{item.get('notes','')}"
+    return (
+        "⏰ НАПОМИНАНИЕ\n\n"
+        "Пора вернуться к этому референсу.\n\n"
+        f"🎬 Платформа: {item.get('platform','')}\n"
+        f"⚡ Приоритет: {item.get('priority_label','')}\n"
+        f"📌 Статус: {item.get('status_label','')}\n"
+        f"📂 Топик: {item.get('topic','')}\n\n"
+        f"💭 Заметка:\n{item.get('notes','')}"
+    )
+
+def reminder_alert_kb(item_id):
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+    item = find_item(item_id)
+    link = post_link(item or {})
+    rows = []
+    if link:
+        rows.append([InlineKeyboardButton('🔗 Открыть пост', url=link)])
+    rows.append([
+        InlineKeyboardButton('✅ Готово', callback_data=f'reminder_done:{item_id}'),
+        InlineKeyboardButton('💤 Отложить', callback_data=f'reminder_snooze_menu:{item_id}'),
+    ])
+    rows.append([InlineKeyboardButton('🗑 Удалить напоминание', callback_data=f'reminder_delete:{item_id}')])
+    return InlineKeyboardMarkup(rows)
+
+def reminder_snooze_kb(item_id):
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton('⏱ По часам', callback_data=f'reminder_snooze_hours:{item_id}'),
+         InlineKeyboardButton('📅 По дням', callback_data=f'reminder_snooze_days:{item_id}')],
+        [InlineKeyboardButton('✅ Готово', callback_data=f'reminder_done:{item_id}')],
+    ])
+
+
+def reference_post_kb(item_id):
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton('⚡ Приоритет', callback_data=f'post_priority_menu:{item_id}'),
+            InlineKeyboardButton('📌 Статус', callback_data=f'post_status_menu:{item_id}'),
+        ],
+        [InlineKeyboardButton('⏰ Напомнить', callback_data=f'post_reminder_menu:{item_id}')],
+    ])
+
+async def send_reminder_alert(context, user_id, item):
+    text = reminder_text(item)
+    markup = reminder_alert_kb(item.get('id'))
+    try:
+        if file_exists(REMINDER_ALERT_IMAGE):
+            with open(REMINDER_ALERT_IMAGE, 'rb') as f:
+                await context.bot.send_photo(chat_id=user_id, photo=f, caption=text, reply_markup=markup)
+        else:
+            await context.bot.send_message(chat_id=user_id, text=text, reply_markup=markup)
+        if item.get('chat_id') and item.get('message_id'):
+            await context.bot.copy_message(chat_id=user_id, from_chat_id=item.get('chat_id'), message_id=item.get('message_id'))
+    except Exception as e:
+        logger.error(f'reminder send error: {type(e).__name__}: {repr(e)}')
+
+async def remove_reminder_from_original_post(context, item):
+    if not item:
+        return
+    try:
+        new_item = update_item(item.get('id'), {
+            'reminder': None,
+            'reminder_label': None,
+            'reminder_due_ts': None,
+        })
+        if new_item and new_item.get('chat_id') and new_item.get('message_id'):
+            cap = video_caption(
+                new_item.get('platform',''),
+                new_item.get('url',''),
+                new_item.get('notes',''),
+                new_item.get('priority_label',''),
+                new_item.get('status_label',''),
+                new_item.get('reminder_label')
+            )
+            try:
+                await context.bot.edit_message_caption(
+                    chat_id=new_item.get('chat_id'),
+                    message_id=new_item.get('message_id'),
+                    caption=cap,
+                    reply_markup=reference_post_kb(new_item.get('id'))
+                )
+            except Exception:
+                try:
+                    await context.bot.edit_message_text(
+                        chat_id=new_item.get('chat_id'),
+                        message_id=new_item.get('message_id'),
+                        text=cap,
+                        reply_markup=reference_post_kb(new_item.get('id'))
+                    )
+                except Exception:
+                    pass
+    except Exception as e:
+        logger.error(f'original reminder cleanup error: {type(e).__name__}: {repr(e)}')
 
 async def reminders_job(context):
     try:
-        d=load_reminders(); changed=False; t=time.time()
+        d = load_reminders()
+        changed = False
+        t = time.time()
         for r in d:
-            if r.get('sent') or r.get('due_ts',0)>t: continue
-            item=find_item(r.get('item_id'))
+            if r.get('sent') or r.get('cancelled') or r.get('due_ts', 0) > t:
+                continue
+            item = find_item(r.get('item_id'))
             if item:
-                try:
-                    await context.bot.send_message(chat_id=r.get('user_id'), text=reminder_text(item))
-                    if item.get('chat_id') and item.get('message_id'):
-                        await context.bot.copy_message(chat_id=r.get('user_id'), from_chat_id=item.get('chat_id'), message_id=item.get('message_id'))
-                except Exception as e: logger.error(f'reminder send error: {type(e).__name__}: {repr(e)}')
-                update_item(item.get('id'), {'reminder':'finished','reminder_label':'✅ Reminder finished'})
-            r['sent']=True; r['sent_at']=now(); changed=True
-        if changed: save_reminders(d)
-    except Exception as e: logger.error(f'reminder job error: {type(e).__name__}: {repr(e)}')
+                await send_reminder_alert(context, r.get('user_id'), item)
+                await remove_reminder_from_original_post(context, item)
+            r['sent'] = True
+            r['sent_at'] = now()
+            changed = True
+        if changed:
+            save_reminders(d)
+    except Exception as e:
+        logger.error(f'reminder job error: {type(e).__name__}: {repr(e)}')
 
 # URL/platform
 
@@ -237,10 +408,16 @@ def threads_disabled(p): return p in {'Threads Post','Threads'}
 
 def screenshot_fallback(p): return p in {'X Post','Instagram Post'}
 
-def video_caption(p,u,n,pri,st,rem=None):
-    r=f'\n🔔 Reminder: {rem}' if rem else ''
-    return f'🎬 {p}\n\n⚡ Priority: {pri}\n📌 Status: {st}{r}\n\n🔗 Link:\n{u}\n\n💭 Notes:\n{n}'
-
+def video_caption(p, u, n, pri, st, rem=None):
+    reminder_line = f'\n⏰ Напоминание: {rem}\n#напоминание' if rem else ''
+    return (
+        f'🎬 {p}\n\n'
+        f'⚡ Приоритет: {pri}\n'
+        f'📌 Статус: {st}'
+        f'{reminder_line}\n\n'
+        f'🔗 Ссылка:\n{u}\n\n'
+        f'💭 Заметка:\n{n}'
+    )
 def profile_caption(u,n,p):
     title={'Instagram Profile':'📸 Instagram Profile Reference','TikTok Profile':'🎵 TikTok Profile Reference','X Profile':'𝕏 X Profile Reference','Threads Profile':'🧵 Threads Profile Reference'}.get(p,'📸 Profile Reference')
     acc=profile_username(u,p) or 'Unknown'
@@ -348,7 +525,7 @@ def export_csv(user_id=None):
     d=load_db();
     if user_id is not None: d=[x for x in d if str(x.get('owner_id'))==str(user_id)]
     p=DOWNLOAD_DIR / f'referens_database_{user_id or "all"}.csv'
-    fields=['id','owner_id','created_at','type','topic','platform','username','url','notes','priority','status','reminder','message_id','chat_id']
+    fields=['id','owner_id','created_at','updated_at','type','topic','platform','username','url','notes','priority_label','status_label','reminder_label','reminder_due_ts','message_id','chat_id']
     with p.open('w',encoding='utf-8',newline='') as f:
         w=csv.DictWriter(f, fieldnames=fields); w.writeheader()
         for x in d: w.writerow({k:x.get(k,'') for k in fields})
