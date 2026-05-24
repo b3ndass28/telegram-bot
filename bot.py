@@ -117,7 +117,6 @@ def reminders_menu_kb():
 
 def reminder_time_type_kb(item):
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton('🧪 Тест 1 минута', callback_data=f'post_reminder_set:test:{item}')],
         [InlineKeyboardButton('⏱ По часам', callback_data=f'post_reminder_hours:{item}')],
         [InlineKeyboardButton('📅 По дням', callback_data=f'post_reminder_days:{item}')],
         [InlineKeyboardButton('🗑 Убрать напоминание', callback_data=f'post_reminder_remove:{item}')],
@@ -171,9 +170,6 @@ def priority_kb():
         [InlineKeyboardButton('❌ Отмена', callback_data='cancel_save')],
     ])
 
-def cancel_download_kb(uid):
-    return InlineKeyboardMarkup([[InlineKeyboardButton('❌ Отменить скачивание', callback_data=f'cancel_download:{uid}')]])
-
 def post_kb(item):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton('⚡ Приоритет', callback_data=f'post_priority_menu:{item}'), InlineKeyboardButton('📌 Статус', callback_data=f'post_status_menu:{item}')],
@@ -215,9 +211,7 @@ async def start_bg_save(query, context):
     if context.application.bot_data.get(f'processing_{uid}'):
         await query.message.reply_text('⏳ Пожалуйста, подожди. Сейчас бот уже обрабатывает предыдущий референс.'); return
     context.application.bot_data[f'processing_{uid}']=True
-    t=asyncio.create_task(save_selected_content(query, context))
-    context.application.bot_data[f'download_task_{uid}']=t
-    t.add_done_callback(task_done)
+    t=asyncio.create_task(save_selected_content(query, context)); t.add_done_callback(task_done)
 async def update_post(query, item):
     cap=video_caption(item.get('platform',''),item.get('url',''),item.get('notes',''),item.get('priority_label',''),item.get('status_label',''),item.get('reminder_label'))
     try: await query.edit_message_caption(caption=cap, reply_markup=post_kb(item.get('id')))
@@ -328,11 +322,7 @@ async def reset_cmd(update, context):
     if not await require_access(update, context):
         return
     uid = update.effective_user.id
-    task = context.application.bot_data.get(f'download_task_{uid}')
-    if task and not task.done():
-        task.cancel()
     context.application.bot_data.pop(f'processing_{uid}', None)
-    context.application.bot_data.pop(f'download_task_{uid}', None)
     context.application.bot_data.pop(f'queued_{uid}', None)
     await update.message.reply_text('✅ Processing сброшен.')
 
@@ -414,29 +404,6 @@ async def menu_callback(update, context):
     if data=='export_csv':
         p=export_csv(uid); await q.message.reply_document(document=InputFile(open(p,'rb'), filename='referens_database.csv')); return
 
-async def cancel_download_callback(update, context):
-    q = update.callback_query
-    await q.answer()
-    uid = q.from_user.id
-    data_uid = q.data.split(':', 1)[1] if ':' in q.data else str(uid)
-
-    if str(uid) != str(data_uid) and not is_owner(uid):
-        await q.answer('Это не твоё скачивание.', show_alert=True)
-        return
-
-    task = context.application.bot_data.get(f'download_task_{data_uid}')
-    if task and not task.done():
-        task.cancel()
-        context.application.bot_data.pop(f'processing_{data_uid}', None)
-        context.application.bot_data.pop(f'download_task_{data_uid}', None)
-        context.user_data.pop('content', None)
-        context.user_data.pop('selected_topic', None)
-        context.user_data.pop('selected_priority', None)
-        await safe_edit(q, '❌ Скачивание отменено.')
-    else:
-        context.application.bot_data.pop(f'processing_{data_uid}', None)
-        await safe_edit(q, 'ℹ️ Активного скачивания уже нет.')
-
 async def save_priority_callback(update, context):
     q=update.callback_query; await q.answer()
     if not await require_access(update, context): return
@@ -491,10 +458,7 @@ async def post_action_callback(update, context):
 
     if d.startswith('post_reminder_set:'):
         _, rk, item = d.split(':', 2)
-        if rk == 'test':
-            seconds = 60
-            label = 'тест через 1 мин.'
-        elif rk.endswith('h'):
+        if rk.endswith('h'):
             hours = int(rk[:-1])
             seconds = hours * 3600
             label = f'через {hours} ч.'
@@ -572,13 +536,43 @@ async def handle_message(update, context):
     if text=='ℹ️ Инфо': await info_cmd(update, context); return
     if text=='📤 Экспорт': await export_cmd(update, context); return
     if text=='✅ Проверка': await check_cmd(update, context); return
-    if mode=='awaiting_chat_id':
-        try: set_chat(uid, int(text)); context.user_data.pop('mode',None); await update.message.reply_text('✅ Chat ID сохранён.', reply_markup=reply_panel())
-        except Exception: await update.message.reply_text('Chat ID должен быть числом.')
+    if text in ('❌ Отмена','Отмена','/cancel'):
+        context.user_data.clear()
+        await update.message.reply_text('❌ Режим сброшен.', reply_markup=reply_panel())
         return
+    # Если пользователь был в режиме ввода ID, но отправил ссылку — не падаем, а сохраняем референс.
+    if mode in ('awaiting_chat_id', 'awaiting_allow_user', 'awaiting_revoke_user') and has_link(text):
+        context.user_data.pop('mode', None)
+        await process_content(update, context, text)
+        return
+
+    if mode=='awaiting_chat_id':
+        try:
+            set_chat(uid, int(text.strip()))
+            context.user_data.pop('mode',None)
+            await update.message.reply_text('✅ Chat ID сохранён.', reply_markup=reply_panel())
+        except Exception:
+            await update.message.reply_text('Chat ID должен быть числом. Если хочешь сохранить ссылку — отправь её ещё раз.')
+        return
+
     if mode=='awaiting_allow_user' and is_owner(uid):
-        parts=text.split(); allow_user(int(parts[0]), ' '.join(parts[1:]) or 'User'); context.user_data.pop('mode',None); await update.message.reply_text('✅ Доступ выдан.', reply_markup=reply_panel()); return
-    if mode=='awaiting_revoke_user' and is_owner(uid): revoke_user(int(text)); context.user_data.pop('mode',None); await update.message.reply_text('🗑 Доступ удалён.', reply_markup=reply_panel()); return
+        try:
+            parts=text.split()
+            allow_user(int(parts[0]), ' '.join(parts[1:]) or 'User')
+            context.user_data.pop('mode',None)
+            await update.message.reply_text('✅ Доступ выдан.', reply_markup=reply_panel())
+        except Exception:
+            await update.message.reply_text('Нужен Telegram ID пользователя числом. Пример: 123456789 Имя')
+        return
+
+    if mode=='awaiting_revoke_user' and is_owner(uid):
+        try:
+            revoke_user(int(text.strip()))
+            context.user_data.pop('mode',None)
+            await update.message.reply_text('🗑 Доступ удалён.', reply_markup=reply_panel())
+        except Exception:
+            await update.message.reply_text('Нужен Telegram ID пользователя числом.')
+        return
     if mode=='awaiting_new_topic': await handle_new_topic(update, context, text); return
     if mode=='awaiting_rename_topic': await handle_rename_topic(update, context, text); return
     await process_content(update, context, text)
@@ -620,7 +614,7 @@ async def save_selected_content(q, context, link_only=False):
         url,note=extract_url_note(content); url=norm_inst(url) if 'instagram.com' in url.lower() else norm_threads(url) if 'threads.' in url.lower() else clean_url(url)
         p=platform(url); chat=get_chat(uid); tid=get_topics(uid)[topic]['id']; icon=get_topics(uid)[topic].get('icon','📌'); item_id=str(uuid.uuid4())
         if is_profile(url):
-            await safe_edit(q,f'📸 Делаю скриншот профиля...\n\n{icon} {topic}\n🎬 {p}', cancel_download_kb(uid))
+            await safe_edit(q,f'📸 Делаю скриншот профиля...\n\n{icon} {topic}\n🎬 {p}')
             media=await screenshot_page(url); cap=profile_caption(url,note,p)
             with open(media,'rb') as f: msg=await context.bot.send_photo(chat_id=chat,message_thread_id=tid,photo=f,caption=cap,read_timeout=120,write_timeout=120,connect_timeout=120)
             add_item({'id':item_id,'owner_id':uid,'created_at':now(),'updated_at':now(),'type':'profile_reference','topic':topic,'topic_id':tid,'platform':p,'username':profile_username(url,p),'url':url,'notes':note,'chat_id':chat,'message_id':msg.message_id})
@@ -631,20 +625,12 @@ async def save_selected_content(q, context, link_only=False):
             add_item({'id':item_id,'owner_id':uid,'created_at':now(),'updated_at':now(),'type':'link_reference','topic':topic,'topic_id':tid,'platform':p,'url':url,'notes':note,'priority_label':pri,'status_label':st,'chat_id':chat,'message_id':msg.message_id})
             await safe_edit(q,f'✅ Пост сохранён как ссылка\n\n{icon} {topic}\n🎬 {p}')
         else:
-            pri=PRIORITIES[context.user_data.get('selected_priority','normal')]['label']; st=STATUSES['new']; await safe_edit(q,f'⏳ Скачиваю видео...\n\n{icon} {topic}\n⚡ Приоритет: {pri}\n🎬 {p}', cancel_download_kb(uid))
+            pri=PRIORITIES[context.user_data.get('selected_priority','normal')]['label']; st=STATUSES['new']; await safe_edit(q,f'⏳ Скачиваю видео...\n\n{icon} {topic}\n⚡ Приоритет: {pri}\n🎬 {p}')
             media=await download_video(url); cap=video_caption(p,url,note,pri,st)
-            with open(media,'rb') as f:
-                msg=await context.bot.send_video(
-                    chat_id=chat,
-                    message_thread_id=tid,
-                    video=f,
-                    caption=cap,
-                    reply_markup=post_kb(item_id),
-                    supports_streaming=True,
-                    read_timeout=180,
-                    write_timeout=180,
-                    connect_timeout=180
-                )
+            try:
+                with open(media,'rb') as f: msg=await context.bot.send_video(chat_id=chat,message_thread_id=tid,video=f,caption=cap,reply_markup=post_kb(item_id),supports_streaming=True,read_timeout=120,write_timeout=120,connect_timeout=120)
+            except Exception:
+                with open(media,'rb') as f: msg=await context.bot.send_document(chat_id=chat,message_thread_id=tid,document=f,caption=cap,reply_markup=post_kb(item_id),read_timeout=120,write_timeout=120,connect_timeout=120)
             add_item({'id':item_id,'owner_id':uid,'created_at':now(),'updated_at':now(),'type':'video_reference','topic':topic,'topic_id':tid,'platform':p,'url':url,'notes':note,'priority_label':pri,'status_label':st,'chat_id':chat,'message_id':msg.message_id})
             await safe_edit(q,f'✅ Видео сохранено\n\n{icon} {topic}\n⚡ Приоритет: {pri}\n🎬 {p}')
         context.user_data.clear()
@@ -653,7 +639,6 @@ async def save_selected_content(q, context, link_only=False):
         await q.message.reply_text(f'❌ Ошибка обработки: {e}')
     finally:
         context.application.bot_data.pop(f'processing_{uid}',None)
-        context.application.bot_data.pop(f'download_task_{uid}',None)
         if media and os.path.exists(media):
             try: os.remove(media)
             except Exception: pass
@@ -772,7 +757,6 @@ def main():
     threading.Thread(target=run_web_server, daemon=True).start()
     app=Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     for name,fn in [('start',start),('menu',menu_cmd),('panel',panel_cmd),('setup',setup_cmd),('connectchat',connectchat_cmd),('connecttopic',connecttopic_cmd),('allow',allow_cmd),('users',users_cmd),('topics',topics_cmd),('reminders',reminders_cmd),('info',info_cmd),('export',export_cmd),('id',id_cmd),('check',check_cmd),('reset',reset_cmd),('backup',backup_cmd),('restore',restore_cmd),('connectbackup',connectbackup_cmd),('autobackup_on',autobackup_on_cmd),('autobackup_off',autobackup_off_cmd),('broadcast',broadcast_cmd)]: app.add_handler(CommandHandler(name,fn))
-    app.add_handler(CallbackQueryHandler(cancel_download_callback, pattern='^cancel_download:'))
     app.add_handler(CallbackQueryHandler(menu_callback, pattern='^(menu_|setup_|owner_|topics_|rename_select:|delete_select:|confirm_delete:|export_|reminders_)'))
     app.add_handler(CallbackQueryHandler(backup_callback, pattern='^(backup_|restore_start|autobackup_)'))
     app.add_handler(CallbackQueryHandler(save_priority_callback, pattern='^(save_priority_|save_link_only|cancel_save)'))

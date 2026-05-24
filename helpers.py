@@ -461,7 +461,7 @@ def best_file(vid):
 
 def download_video_sync(u):
     vid=str(uuid.uuid4()); tmpl=str(DOWNLOAD_DIR / f'{vid}.%(ext)s')
-    opts={'outtmpl':tmpl,'format':'bestvideo[vcodec^=avc1][height<=720][ext=mp4]+bestaudio[ext=m4a]/best[vcodec^=avc1][height<=720][ext=mp4]/best[height<=720][ext=mp4]/best[ext=mp4]','format_sort':['vcodec:h264','ext:mp4','res:720','fps'],'noplaylist':True,'quiet':True,'no_warnings':True,'noprogress':True,'max_filesize':48*1024*1024,'merge_output_format':'mp4','socket_timeout':25,'retries':3,'fragment_retries':3,'concurrent_fragment_downloads':2}
+    opts={'outtmpl':tmpl,'format':'best[vcodec^=avc1][height<=720][ext=mp4]/best[height<=720][ext=mp4]/best[ext=mp4]/best','format_sort':['vcodec:h264','ext:mp4','res:720','fps'],'noplaylist':True,'quiet':True,'no_warnings':True,'noprogress':True,'max_filesize':48*1024*1024,'merge_output_format':'mp4','socket_timeout':25,'retries':3,'fragment_retries':3,'concurrent_fragment_downloads':2}
     if COOKIES_FILE.exists(): opts['cookiefile']=str(COOKIES_FILE)
     with yt_dlp.YoutubeDL(opts) as ydl: ydl.extract_info(u, download=True)
     path=best_file(vid)
